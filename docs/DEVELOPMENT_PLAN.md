@@ -9,61 +9,61 @@ This plan translates `project-overview.md` and `ARCHITECTURE.md` into an executa
 - Observability as a first-class feature.
 - Configuration and selectors are database-driven, not hardcoded.
 
-## Phase 0: Foundation and Developer Experience
+## Phase 0: Foundation and Developer Experience ✅
 Goal: Make the repository runnable, testable, and consistent.
 
 Deliverables:
-- Poetry-based dependency management and lockfile.
+- ✅ Poetry-based dependency management and lockfile.
 - CI workflow that runs tests on push/PR.
-- Makefile commands for common tasks.
-- Base docs for architecture and overview.
+- ✅ Makefile commands for common tasks.
+- ✅ Base docs for architecture and overview.
 - .env.example and config conventions.
 
 Acceptance criteria:
 - `make test` succeeds in CI.
-- `make up` boots local services with no manual edits.
-- Docs describe how to submit a job and read results.
+- ✅ `make up` boots local services with no manual edits.
+- ✅ Docs describe how to submit a job and read results.
 
-## Phase 1: Core Control Plane (API + State)
+## Phase 1: Core Control Plane (API + State) ✅
 Goal: Implement the API, job contract, and durable state machine.
 
 Deliverables:
-- FastAPI app with `/submit`, `/status/{job_id}`, `/results/{job_id}`.
-- Pydantic schemas for jobs and results.
-- Postgres schema for `jobs`, `job_attempts`, `artifacts`.
-- Redis queues: priority + engine routing.
-- ARQ tasks skeleton and dispatcher contract.
+- ✅ FastAPI app with `/submit`, `/status/{job_id}`, `/results/{job_id}`.
+- ✅ Pydantic schemas for jobs and results.
+- ✅ Postgres schema for `jobs`, `job_attempts`, `artifacts`.
+- ✅ Redis queues: priority + engine routing.
+- ✅ ARQ tasks skeleton and dispatcher contract.
 
 Acceptance criteria:
-- Submitting a job creates a DB record and enqueues in Redis.
-- Status endpoint reflects state transitions (queued -> running -> done).
-- Results endpoint returns structured output and artifact links.
+- ✅ Submitting a job creates a DB record and enqueues in Redis.
+- ✅ Status endpoint reflects state transitions (queued -> running -> done).
+- ✅ Results endpoint returns structured output and artifact links.
 
-## Phase 2: Data Plane MVP (FastEngine)
+## Phase 2: Data Plane MVP (FastEngine) ✅
 Goal: Get deterministic scraping working end-to-end for static pages.
 
 Deliverables:
-- Scrapy spider that fetches URLs from the queue.
-- Parser that uses selectors from DB (no hardcoded selectors).
-- Artifact capture: HTML stored to S3/MinIO and referenced in DB.
-- Storage worker to persist validated output.
+- ✅ Scrapy spider that fetches URLs from the queue.
+- ✅ Parser that uses selectors from DB (no hardcoded selectors).
+- ✅ Artifact capture: HTML stored to S3/MinIO and referenced in DB.
+- ✅ Storage worker to persist validated output.
 
 Acceptance criteria:
-- Static target successfully extracted with schema validation.
-- Artifacts uploaded and linked to job record.
-- Errors captured in `job_attempts` with a reason code.
+- ✅ Static target successfully extracted with schema validation.
+- ✅ Artifacts uploaded and linked to job record.
+- ✅ Errors captured in `job_attempts` with a reason code.
 
-## Phase 3: BrowserEngine and Rendering
+## Phase 3: BrowserEngine and Rendering ✅
 Goal: Support JS-rendered targets using Playwright.
 
 Deliverables:
-- Playwright integration with proper browser contexts.
-- Rendering policies (timeout, wait conditions).
-- Capture screenshot and HAR for rendered sessions.
+- ✅ Playwright integration with proper browser contexts.
+- ✅ Rendering policies (timeout, wait conditions).
+- ✅ Capture screenshot and HAR for rendered sessions.
 
 Acceptance criteria:
-- SPA target returns validated data via BrowserEngine.
-- HAR and screenshot artifacts stored for successful runs.
+- ✅ SPA target returns validated data via BrowserEngine.
+- ✅ HAR and screenshot artifacts stored for successful runs.
 
 ## Phase 4: Hybrid Parsing and LLM Recovery
 Goal: Add AI-assisted recovery to reduce selector fragility.
