@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -12,9 +13,11 @@ from sqlalchemy import select
 from core.artifacts import ArtifactStore
 from core.config import settings
 from core.db import async_session
-from core.models import Artifact, Job, Selector
+from core.models import Artifact, Job
 from scraper.engine import EngineOutcome
-from scraper.parsing import SelectorSpec, parse_html
+from scraper.llm_recovery import recover_with_llm
+from scraper.parsing import parse_html
+from scraper.selector_registry import load_selectors_async, record_candidates_async
 
 
 async def run_browser_engine(job_id: UUID) -> EngineOutcome:
@@ -25,22 +28,9 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
             return EngineOutcome(success=False, error="job_not_found")
         if not job.schema_id:
             return EngineOutcome(success=False, error="schema_missing")
-        selector_result = await session.execute(
-            select(Selector)
-            .where(Selector.schema_id == job.schema_id)
-            .where(Selector.active.is_(True))
-        )
-        selectors = [
-            SelectorSpec(
-                field=row.field,
-                selector=row.selector,
-                data_type=row.data_type,
-                required=row.required,
-            )
-            for row in selector_result.scalars().all()
-        ]
         url = job.url
 
+    selectors = await load_selectors_async(job.schema_id)
     if not selectors:
         return await _mark_failed(job_id, "no_selectors")
 
@@ -63,8 +53,15 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
 
     data, errors = parse_html(html or "", selectors)
     if errors:
-        await _update_job(job_id, None, "validation_failed", store, html, screenshot_bytes, har_bytes)
-        return EngineOutcome(success=False, error="validation_failed")
+        llm_result = await asyncio.to_thread(recover_with_llm, html or "", selectors)
+        if llm_result.success and llm_result.data is not None:
+            await record_candidates_async(job.schema_id, selectors, llm_result.selectors or {})
+            await _update_job(job_id, llm_result.data, None, store, html, screenshot_bytes, har_bytes)
+            return EngineOutcome(success=True, error=None)
+
+        error = llm_result.error or "llm_failed"
+        await _update_job(job_id, None, error, store, html, screenshot_bytes, har_bytes)
+        return EngineOutcome(success=False, error=error)
 
     await _update_job(job_id, data, None, store, html, screenshot_bytes, har_bytes)
     return EngineOutcome(success=True, error=None)
