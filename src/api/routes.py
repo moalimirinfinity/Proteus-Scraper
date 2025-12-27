@@ -15,6 +15,9 @@ from api.schemas import (
     JobStatusResponse,
     JobSubmitRequest,
     JobSubmitResponse,
+    IdentityCreate,
+    IdentityOut,
+    IdentityUpdate,
     PreviewRequest,
     SchemaCreate,
     SchemaOut,
@@ -24,7 +27,9 @@ from api.schemas import (
     SelectorUpdate,
 )
 from core.db import get_session
-from core.models import Artifact, Job, Schema, Selector, SelectorCandidate
+from core.identity_crypto import IdentityCryptoError, encrypt_payload
+from core.metrics import record_job_state
+from core.models import Artifact, Identity, Job, Schema, Selector, SelectorCandidate
 from core.queues import enqueue_priority
 from core.redis import get_redis
 from core.tasks import process_job, select_engine
@@ -81,6 +86,22 @@ def _selector_out(selector: Selector) -> SelectorOut:
     )
 
 
+def _identity_out(identity: Identity) -> IdentityOut:
+    return IdentityOut(
+        id=str(identity.id),
+        tenant=identity.tenant,
+        label=identity.label,
+        fingerprint=identity.fingerprint,
+        active=identity.active,
+        use_count=identity.use_count,
+        failure_count=identity.failure_count,
+        last_used_at=identity.last_used_at,
+        last_failed_at=identity.last_failed_at,
+        created_at=identity.created_at,
+        updated_at=identity.updated_at,
+    )
+
+
 @router.post("/submit", response_model=JobSubmitResponse, status_code=status.HTTP_201_CREATED)
 async def submit_job(
     payload: JobSubmitRequest,
@@ -100,6 +121,11 @@ async def submit_job(
 
     redis = get_redis()
     await enqueue_priority(redis, payload.priority.value, str(job.id))
+    record_job_state(
+        JobState.queued.value,
+        payload.engine.value if payload.engine else "auto",
+        job.url,
+    )
 
     return JobSubmitResponse(job_id=str(job.id), state=JobState.queued)
 
@@ -384,6 +410,95 @@ async def delete_selector(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get("/identities", response_model=list[IdentityOut])
+async def list_identities(
+    tenant: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[IdentityOut]:
+    query = select(Identity).order_by(Identity.created_at.desc())
+    if tenant is not None:
+        query = query.where(Identity.tenant == tenant)
+    result = await session.execute(query)
+    return [_identity_out(identity) for identity in result.scalars().all()]
+
+
+@router.post("/identities", response_model=IdentityOut, status_code=status.HTTP_201_CREATED)
+async def create_identity(
+    payload: IdentityCreate,
+    session: AsyncSession = Depends(get_session),
+) -> IdentityOut:
+    tenant_key = payload.tenant or "default"
+    identity = Identity(
+        tenant=tenant_key,
+        label=payload.label,
+        fingerprint=payload.fingerprint,
+        active=payload.active,
+    )
+    if payload.cookies is not None:
+        try:
+            identity.cookies_encrypted = encrypt_payload(payload.cookies)
+        except IdentityCryptoError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
+    session.add(identity)
+    await session.commit()
+    await session.refresh(identity)
+    return _identity_out(identity)
+
+
+@router.get("/identities/{identity_id}", response_model=IdentityOut)
+async def get_identity(
+    identity_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> IdentityOut:
+    result = await session.execute(select(Identity).where(Identity.id == identity_id))
+    identity = result.scalar_one_or_none()
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="identity not found")
+    return _identity_out(identity)
+
+
+@router.patch("/identities/{identity_id}", response_model=IdentityOut)
+async def update_identity(
+    identity_id: UUID,
+    payload: IdentityUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> IdentityOut:
+    result = await session.execute(select(Identity).where(Identity.id == identity_id))
+    identity = result.scalar_one_or_none()
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="identity not found")
+
+    if payload.label is not None:
+        identity.label = payload.label
+    if payload.fingerprint is not None:
+        identity.fingerprint = payload.fingerprint
+    if payload.active is not None:
+        identity.active = payload.active
+    if payload.cookies is not None:
+        try:
+            identity.cookies_encrypted = encrypt_payload(payload.cookies)
+        except IdentityCryptoError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
+
+    await session.commit()
+    await session.refresh(identity)
+    return _identity_out(identity)
+
+
+@router.delete("/identities/{identity_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_identity(
+    identity_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    result = await session.execute(select(Identity).where(Identity.id == identity_id))
+    identity = result.scalar_one_or_none()
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="identity not found")
+    await session.delete(identity)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/schemas/{schema_id}/preview", response_model=JobResultResponse)
 async def preview_schema(
     schema_id: str,
@@ -410,6 +525,7 @@ async def preview_schema(
     session.add(job)
     await session.commit()
     await session.refresh(job)
+    record_job_state(JobState.queued.value, engine, job.url)
 
     await process_job({}, str(job.id))
 
