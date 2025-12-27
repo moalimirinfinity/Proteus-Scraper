@@ -7,7 +7,10 @@ from sqlalchemy import select
 
 from core.artifacts import ArtifactStore
 from core.db_sync import get_sync_session
+from core.config import settings
 from core.models import Artifact, Job
+from scraper.llm_recovery import recover_with_llm
+from scraper.selector_registry import load_selectors_sync, record_candidates_sync
 
 
 class StoragePipeline:
@@ -38,9 +41,26 @@ class StoragePipeline:
                 return item
 
             if errors:
-                job.state = "failed"
-                job.error = "validation_failed"
-                job.result = None
+                if not job.schema_id:
+                    job.state = "failed"
+                    job.error = "schema_missing"
+                    job.result = None
+                elif settings.openai_api_key:
+                    selectors = load_selectors_sync(job.schema_id)
+                    llm_result = recover_with_llm(html, selectors)
+                    if llm_result.success and llm_result.data is not None:
+                        job.state = "succeeded"
+                        job.error = None
+                        job.result = llm_result.data
+                        record_candidates_sync(job.schema_id, selectors, llm_result.selectors or {})
+                    else:
+                        job.state = "failed"
+                        job.error = llm_result.error or "llm_failed"
+                        job.result = None
+                else:
+                    job.state = "failed"
+                    job.error = "llm_unavailable"
+                    job.result = None
             else:
                 job.state = "succeeded"
                 job.error = None
