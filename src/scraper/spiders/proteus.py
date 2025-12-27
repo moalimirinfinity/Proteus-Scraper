@@ -29,7 +29,7 @@ class ProteusSpider(Spider):
         yield Request(self.start_url, callback=self.parse, meta={"job_id": self.job_id})
 
     def parse(self, response):
-        data, errors = parse_html(response.text, self.selectors)
+        data, errors = parse_html(response.text, self.selectors, base_url=response.url)
         yield {
             "job_id": self.job_id,
             "url": response.url,
