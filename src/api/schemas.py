@@ -67,3 +67,54 @@ class JobResultResponse(BaseModel):
     data: dict[str, Any] | None = None
     artifacts: list[ArtifactOut] = Field(default_factory=list)
     error: str | None = None
+
+
+class SchemaCreate(BaseModel):
+    schema_id: str = Field(..., min_length=1)
+    name: str | None = None
+    description: str | None = None
+
+
+class SchemaUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class SchemaOut(BaseModel):
+    schema_id: str
+    name: str | None = None
+    description: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class SelectorCreate(BaseModel):
+    field: str = Field(..., min_length=1)
+    selector: str = Field(..., min_length=1)
+    data_type: str = "string"
+    required: bool = True
+    active: bool = True
+
+
+class SelectorUpdate(BaseModel):
+    field: str | None = None
+    selector: str | None = None
+    data_type: str | None = None
+    required: bool | None = None
+    active: bool | None = None
+
+
+class SelectorOut(BaseModel):
+    id: str
+    schema_id: str
+    field: str
+    selector: str
+    data_type: str
+    required: bool
+    active: bool
+    created_at: datetime | None = None
+
+
+class PreviewRequest(BaseModel):
+    url: str = Field(..., min_length=1)
+    engine: EngineType | None = None
