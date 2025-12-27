@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urljoin
 
 from selectolax.parser import HTMLParser
 
@@ -11,16 +12,21 @@ class SelectorSpec:
     selector: str
     data_type: str
     required: bool = True
+    group_name: str | None = None
+    item_selector: str | None = None
+    attribute: str | None = None
 
 
-def parse_html(html: str, selectors: list[SelectorSpec]) -> tuple[dict, list[str]]:
+def parse_html(html: str, selectors: list[SelectorSpec], base_url: str | None = None) -> tuple[dict, list[str]]:
     tree = HTMLParser(html)
     data: dict[str, object] = {}
     errors: list[str] = []
 
-    for spec in selectors:
+    flat, groups = _split_selectors(selectors)
+
+    for spec in flat:
         node = tree.css_first(spec.selector)
-        raw = node.text(strip=True) if node else None
+        raw = _extract_raw(node, spec, base_url)
         if raw is None or raw == "":
             if spec.required:
                 errors.append(f"missing:{spec.field}")
@@ -29,6 +35,39 @@ def parse_html(html: str, selectors: list[SelectorSpec]) -> tuple[dict, list[str
             data[spec.field] = coerce_value(raw, spec.data_type)
         except ValueError:
             errors.append(f"type:{spec.field}")
+
+    for group_name, specs in groups.items():
+        item_selector = _resolve_item_selector(specs)
+        if not item_selector:
+            if any(spec.required for spec in specs):
+                errors.append(f"missing_group_selector:{group_name}")
+            data[group_name] = []
+            continue
+
+        items = tree.css(item_selector)
+        if not items:
+            if any(spec.required for spec in specs):
+                errors.append(f"missing:{group_name}")
+            data[group_name] = []
+            continue
+
+        group_items: list[dict[str, object]] = []
+        for idx, item in enumerate(items):
+            item_data: dict[str, object] = {}
+            for spec in specs:
+                node = item.css_first(spec.selector)
+                raw = _extract_raw(node, spec, base_url)
+                if raw is None or raw == "":
+                    if spec.required:
+                        errors.append(f"missing:{group_name}.{spec.field}:{idx}")
+                    continue
+                try:
+                    item_data[spec.field] = coerce_value(raw, spec.data_type)
+                except ValueError:
+                    errors.append(f"type:{group_name}.{spec.field}:{idx}")
+            group_items.append(item_data)
+
+        data[group_name] = group_items
 
     return data, errors
 
@@ -49,7 +88,9 @@ def normalize_data(data: dict, selectors: list[SelectorSpec]) -> tuple[dict, lis
     normalized: dict[str, object] = {}
     errors: list[str] = []
 
-    for spec in selectors:
+    flat, groups = _split_selectors(selectors)
+
+    for spec in flat:
         if spec.field not in data or data[spec.field] is None:
             if spec.required:
                 errors.append(f"missing:{spec.field}")
@@ -60,7 +101,81 @@ def normalize_data(data: dict, selectors: list[SelectorSpec]) -> tuple[dict, lis
         except ValueError:
             errors.append(f"type:{spec.field}")
 
+    for group_name, specs in groups.items():
+        raw_items = data.get(group_name)
+        if raw_items is None:
+            if any(spec.required for spec in specs):
+                errors.append(f"missing:{group_name}")
+            continue
+        if not isinstance(raw_items, list):
+            errors.append(f"type:{group_name}")
+            continue
+
+        normalized_items: list[dict[str, object]] = []
+        for idx, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                errors.append(f"type:{group_name}:{idx}")
+                continue
+            normalized_item: dict[str, object] = {}
+            for spec in specs:
+                if spec.field not in item or item[spec.field] is None:
+                    if spec.required:
+                        errors.append(f"missing:{group_name}.{spec.field}:{idx}")
+                    continue
+                try:
+                    normalized_item[spec.field] = _normalize_value(item[spec.field], spec.data_type)
+                except ValueError:
+                    errors.append(f"type:{group_name}.{spec.field}:{idx}")
+            normalized_items.append(normalized_item)
+        normalized[group_name] = normalized_items
+
     return normalized, errors
+
+
+def _split_selectors(
+    selectors: list[SelectorSpec],
+) -> tuple[list[SelectorSpec], dict[str, list[SelectorSpec]]]:
+    flat: list[SelectorSpec] = []
+    groups: dict[str, list[SelectorSpec]] = {}
+    for spec in selectors:
+        if spec.group_name:
+            groups.setdefault(spec.group_name, []).append(spec)
+        else:
+            flat.append(spec)
+    return flat, groups
+
+
+def _resolve_item_selector(specs: list[SelectorSpec]) -> str | None:
+    selectors = {spec.item_selector for spec in specs if spec.item_selector}
+    if len(selectors) == 1:
+        return selectors.pop()
+    return None
+
+
+def _extract_raw(node, spec: SelectorSpec, base_url: str | None) -> str | None:
+    if node is None:
+        return None
+    if spec.attribute:
+        value = node.attributes.get(spec.attribute)
+        if value is None:
+            return None
+        return _normalize_attribute(value, spec.attribute, base_url)
+    return node.text(strip=True)
+
+
+def _normalize_attribute(value: str, attribute: str, base_url: str | None) -> str:
+    if not base_url:
+        return value
+    cleaned = value.strip()
+    if not cleaned:
+        return value
+    if cleaned.startswith(("#", "javascript:", "mailto:", "tel:")):
+        return value
+    if attribute in {"href", "src", "data-href", "data-url", "data-src"} or cleaned.startswith(
+        ("/", "http://", "https://", "//")
+    ):
+        return urljoin(base_url, cleaned)
+    return value
 
 
 def _normalize_value(value: object, data_type: str) -> object:
