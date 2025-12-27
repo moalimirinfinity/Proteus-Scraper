@@ -65,18 +65,18 @@ Acceptance criteria:
 - ✅ SPA target returns validated data via BrowserEngine.
 - ✅ HAR and screenshot artifacts stored for successful runs.
 
-## Phase 4: Hybrid Parsing and LLM Recovery
+## Phase 4: Hybrid Parsing and LLM Recovery ✅
 Goal: Add AI-assisted recovery to reduce selector fragility.
 
 Deliverables:
-- Instructor-based LLM output constrained by schema.
-- Revalidation pipeline with explicit failure reasons.
-- Selector candidate generation on LLM success.
-- Selector promotion policy (N successes -> active).
+- ✅ Instructor-based LLM output constrained by schema.
+- ✅ Revalidation pipeline with explicit failure reasons.
+- ✅ Selector candidate generation on LLM success.
+- ✅ Selector promotion policy (N successes -> active).
 
 Acceptance criteria:
-- Selector failure triggers LLM fallback and revalidation.
-- Candidates recorded and promoted after verification threshold.
+- ✅ Selector failure triggers LLM fallback and revalidation.
+- ✅ Candidates recorded and promoted after verification threshold.
 
 ## Phase 5: Governance and Cost Controls
 Goal: Centralize global safety policies for distributed workers.
