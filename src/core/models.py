@@ -83,8 +83,11 @@ class Selector(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     schema_id: Mapped[str] = mapped_column(String(128), index=True)
+    group_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     field: Mapped[str] = mapped_column(String(128), nullable=False)
     selector: Mapped[str] = mapped_column(Text, nullable=False)
+    item_selector: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attribute: Mapped[str | None] = mapped_column(String(128), nullable=True)
     data_type: Mapped[str] = mapped_column(String(32), nullable=False, default="string")
     required: Mapped[bool] = mapped_column(default=True)
     active: Mapped[bool] = mapped_column(default=True)
@@ -99,8 +102,11 @@ class SelectorCandidate(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     schema_id: Mapped[str] = mapped_column(String(128), index=True)
+    group_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     field: Mapped[str] = mapped_column(String(128), nullable=False)
     selector: Mapped[str] = mapped_column(Text, nullable=False)
+    item_selector: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attribute: Mapped[str | None] = mapped_column(String(128), nullable=True)
     data_type: Mapped[str] = mapped_column(String(32), nullable=False, default="string")
     required: Mapped[bool] = mapped_column(default=True)
     success_count: Mapped[int] = mapped_column(default=0)
