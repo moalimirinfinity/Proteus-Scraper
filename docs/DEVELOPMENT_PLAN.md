@@ -9,19 +9,21 @@ This plan translates `project-overview.md` and `ARCHITECTURE.md` into an executa
 - Observability as a first-class feature.
 - Configuration and selectors are database-driven, not hardcoded.
 
-## Phase 0: Foundation and Developer Experience ✅
+## Phase 0: Foundation and Developer Experience (Partial)
 Goal: Make the repository runnable, testable, and consistent.
 
 Deliverables:
 - ✅ Poetry-based dependency management and lockfile.
-- CI workflow that runs tests on push/PR.
-- ✅ Makefile commands for common tasks.
+- ❌ CI workflow that runs tests on push/PR.
+- ✅ Makefile commands for common tasks (dev, stop, POETRY override).
 - ✅ Base docs for architecture and overview.
-- .env.example and config conventions.
+- ✅ .env.example and config conventions (browser settings documented).
+- ✅ SETUP.md quickstart with runnable examples.
 
 Acceptance criteria:
-- `make test` succeeds in CI.
+- ❌ `make test` succeeds in CI (tests directory exists but is empty).
 - ✅ `make up` boots local services with no manual edits.
+- ✅ `make dev` boots infra, initializes DB, and starts API + workers.
 - ✅ Docs describe how to submit a job and read results.
 
 ## Phase 1: Core Control Plane (API + State) ✅
@@ -29,15 +31,18 @@ Goal: Implement the API, job contract, and durable state machine.
 
 Deliverables:
 - ✅ FastAPI app with `/submit`, `/status/{job_id}`, `/results/{job_id}`.
-- ✅ Pydantic schemas for jobs and results.
-- ✅ Postgres schema for `jobs`, `job_attempts`, `artifacts`.
+- ✅ Pydantic schemas for jobs and results (includes Schema models).
+- ✅ Postgres schema for `jobs`, `job_attempts`, `artifacts`, `selectors`, `selector_candidates`, `schemas`.
+- ✅ Schema + selector CRUD endpoints (`/schemas`, `/schemas/{schema_id}/selectors`).
+- ✅ Preview endpoint for immediate extraction (`/schemas/{schema_id}/preview`).
 - ✅ Redis queues: priority + engine routing.
 - ✅ ARQ tasks skeleton and dispatcher contract.
 
 Acceptance criteria:
 - ✅ Submitting a job creates a DB record and enqueues in Redis.
-- ✅ Status endpoint reflects state transitions (queued -> running -> done).
+- ✅ Status endpoint reflects state transitions (queued -> running -> succeeded/failed).
 - ✅ Results endpoint returns structured output and artifact links.
+- ✅ Preview endpoint runs extraction and returns data + artifacts.
 
 ## Phase 2: Data Plane MVP (FastEngine) ✅
 Goal: Get deterministic scraping working end-to-end for static pages.
@@ -45,11 +50,14 @@ Goal: Get deterministic scraping working end-to-end for static pages.
 Deliverables:
 - ✅ Scrapy spider that fetches URLs from the queue.
 - ✅ Parser that uses selectors from DB (no hardcoded selectors).
+- ✅ List extraction with grouped selectors (`group_name` + `item_selector`).
+- ✅ Attribute extraction for fields (e.g., `href`).
 - ✅ Artifact capture: HTML stored to S3/MinIO and referenced in DB.
 - ✅ Storage worker to persist validated output.
 
 Acceptance criteria:
 - ✅ Static target successfully extracted with schema validation.
+- ✅ List page returns arrays of items with per-field validation.
 - ✅ Artifacts uploaded and linked to job record.
 - ✅ Errors captured in `job_attempts` with a reason code.
 
@@ -58,12 +66,26 @@ Goal: Support JS-rendered targets using Playwright.
 
 Deliverables:
 - ✅ Playwright integration with proper browser contexts.
-- ✅ Rendering policies (timeout, wait conditions).
+- ✅ Rendering policies (timeout, wait conditions, optional scroll steps).
 - ✅ Capture screenshot and HAR for rendered sessions.
 
 Acceptance criteria:
 - ✅ SPA target returns validated data via BrowserEngine.
 - ✅ HAR and screenshot artifacts stored for successful runs.
+- ✅ Scroll settings are configurable via environment.
+
+## Phase 3.1: List Pagination/Virtualization ✅
+Goal: Capture long, virtualized lists beyond the initial viewport.
+
+Deliverables:
+- ✅ Scroll-and-collect aggregation in BrowserEngine (merge items per scroll step, de-dupe, max-items cap).
+- ✅ Pagination strategies (next-link detection + page parameter templates).
+- ✅ URL normalization for attribute selectors (relative -> absolute).
+
+Acceptance criteria:
+- ✅ List pages yield more than the initial viewport without custom code.
+- ✅ Items are de-duplicated and stable across scroll steps.
+- ✅ Extracted item URLs are absolute and followable.
 
 ## Phase 4: Hybrid Parsing and LLM Recovery ✅
 Goal: Add AI-assisted recovery to reduce selector fragility.
@@ -73,10 +95,12 @@ Deliverables:
 - ✅ Revalidation pipeline with explicit failure reasons.
 - ✅ Selector candidate generation on LLM success.
 - ✅ Selector promotion policy (N successes -> active).
+- ✅ List-aware LLM extraction for grouped selectors.
 
 Acceptance criteria:
 - ✅ Selector failure triggers LLM fallback and revalidation.
 - ✅ Candidates recorded and promoted after verification threshold.
+- ✅ List-page recovery records candidates with group/item/attribute context.
 
 ## Phase 5: Governance and Cost Controls
 Goal: Centralize global safety policies for distributed workers.
@@ -163,24 +187,26 @@ Acceptance criteria:
 - Integration tests run without hitting external targets.
 - Regression tests catch selector drift or parsing errors.
 
-## Phase 12: Release Readiness
+## Phase 12: Release Readiness (Partial)
 Goal: Make the project consumable by the public.
 
 Deliverables:
-- Contributor guide, security policy, and changelog.
-- Example schemas, jobs, and sample outputs.
-- Docker Compose for single-node demo.
-- Kubernetes manifests or Helm chart for production.
+- ❌ Contributor guide, security policy, and changelog.
+- ✅ Example schemas, jobs, and sample outputs (seed_data includes list example).
+- ✅ Docker Compose for single-node demo (docker-compose.yml exists).
+- ❌ Kubernetes manifests or Helm chart for production.
+- ✅ README with quickstart and examples.
+- ✅ SETUP.md with step-by-step local run instructions.
 
 Acceptance criteria:
-- New contributor can run the stack from scratch.
-- First-time users can submit a job and get results.
+- ✅ New contributor can run the stack from scratch (README provides instructions).
+- ✅ First-time users can submit a job and get results (README has curl examples).
 
 ## Cross-Cutting Workstreams
-- **Schema Registry**: Versioned schemas, migration path, validation rules.
-- **Config Service**: Domain policies, selector sets, and routing rules.
-- **Multi-Tenancy**: Per-tenant budgets, rate limits, and identity pools.
-- **Security**: SSRF protection, allow/deny lists, audit logging.
+- **Schema Registry**: ✅ Schema registry (Schema model exists), ✅ selector sets (grouped + attribute selectors), ✅ CRUD + preview endpoint, ❌ migration path (Alembic configured but no migrations), ✅ validation rules (Pydantic schemas).
+- **Config Service**: ❌ Domain policies, ✅ selector sets (database-driven), ❌ routing rules (basic engine selection only).
+- **Multi-Tenancy**: ❌ Per-tenant budgets, ❌ rate limits, ❌ identity pools (tenant field exists but no implementation).
+- **Security**: ❌ SSRF protection, ❌ allow/deny lists, ❌ audit logging (basic logging only).
 
 ## Dependencies and Order
 - Phases 1-2 are prerequisites for any engine or AI work.
@@ -202,9 +228,13 @@ Acceptance criteria:
 - **Data corruption**: strict schema validation + artifact review.
 
 ## Suggested First Milestone (MVP)
-- FastAPI submit/status/results.
-- Postgres job state machine.
-- Redis queues and dispatcher skeleton.
-- FastEngine scraping + selector registry.
-- Artifact storage to MinIO/S3.
-- Minimal observability (metrics + logs).
+- ✅ FastAPI submit/status/results.
+- ✅ Postgres job state machine.
+- ✅ Redis queues and dispatcher skeleton.
+- ✅ FastEngine scraping + selector registry.
+- ✅ Schema/selector CRUD + preview endpoint.
+- ✅ List extraction + attribute selectors.
+- ✅ BrowserEngine with Playwright.
+- ✅ LLM recovery with selector candidate promotion.
+- ✅ Artifact storage to MinIO/S3.
+- ❌ Minimal observability (basic logging only, no metrics).
