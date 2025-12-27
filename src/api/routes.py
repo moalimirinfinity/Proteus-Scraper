@@ -69,8 +69,11 @@ def _selector_out(selector: Selector) -> SelectorOut:
     return SelectorOut(
         id=str(selector.id),
         schema_id=selector.schema_id,
+        group_name=selector.group_name,
         field=selector.field,
         selector=selector.selector,
+        item_selector=selector.item_selector,
+        attribute=selector.attribute,
         data_type=selector.data_type,
         required=selector.required,
         active=selector.active,
@@ -294,16 +297,22 @@ async def create_selector(
     existing = await session.execute(
         select(Selector)
         .where(Selector.schema_id == schema_id)
+        .where(Selector.group_name == payload.group_name)
         .where(Selector.field == payload.field)
         .where(Selector.selector == payload.selector)
+        .where(Selector.item_selector == payload.item_selector)
+        .where(Selector.attribute == payload.attribute)
     )
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="selector already exists")
 
     selector = Selector(
         schema_id=schema_id,
+        group_name=payload.group_name,
         field=payload.field,
         selector=payload.selector,
+        item_selector=payload.item_selector,
+        attribute=payload.attribute,
         data_type=payload.data_type,
         required=payload.required,
         active=payload.active,
@@ -334,6 +343,12 @@ async def update_selector(
         selector.field = payload.field
     if payload.selector is not None:
         selector.selector = payload.selector
+    if payload.group_name is not None:
+        selector.group_name = payload.group_name
+    if payload.item_selector is not None:
+        selector.item_selector = payload.item_selector
+    if payload.attribute is not None:
+        selector.attribute = payload.attribute
     if payload.data_type is not None:
         selector.data_type = payload.data_type
     if payload.required is not None:
