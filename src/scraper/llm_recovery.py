@@ -61,7 +61,8 @@ def recover_with_llm(html: str, selectors: list[SelectorSpec]) -> LLMRecoveryRes
         return LLMRecoveryResult(success=False, error="llm_validation_failed")
 
     selectors_out = dict(response.selectors or {})
-    filtered = {k: v for k, v in selectors_out.items() if k in normalized and v}
+    allowed_keys = _allowed_selector_keys(selectors)
+    filtered = {k: v for k, v in selectors_out.items() if k in allowed_keys and v}
     if not filtered:
         filtered = _infer_selectors(html_snippet, normalized, selectors)
 
@@ -76,7 +77,9 @@ def _build_response_model(selectors: list[SelectorSpec]):
         "bool": bool,
     }
     fields: dict[str, tuple[type, Field]] = {}
-    for spec in selectors:
+    flat, groups = _split_selectors(selectors)
+
+    for spec in flat:
         field_type = type_map.get(spec.data_type, str)
         if not spec.required:
             field_type = field_type | None
@@ -84,6 +87,24 @@ def _build_response_model(selectors: list[SelectorSpec]):
         else:
             default = ...
         fields[spec.field] = (field_type, Field(default))
+
+    for group_name, specs in groups.items():
+        item_fields: dict[str, tuple[type, Field]] = {}
+        for spec in specs:
+            field_type = type_map.get(spec.data_type, str)
+            if not spec.required:
+                field_type = field_type | None
+                default = None
+            else:
+                default = ...
+            item_fields[spec.field] = (field_type, Field(default))
+
+        item_model = create_model(f"{_safe_model_name(group_name)}Item", **item_fields)
+        list_type = list[item_model]
+        if any(spec.required for spec in specs):
+            fields[group_name] = (list_type, Field(...))
+        else:
+            fields[group_name] = (list_type, Field(default_factory=list))
 
     data_model = create_model("ExtractedData", **fields)
     response_model = create_model(
@@ -95,17 +116,42 @@ def _build_response_model(selectors: list[SelectorSpec]):
 
 
 def _build_prompt(selectors: list[SelectorSpec], html: str) -> str:
+    flat, groups = _split_selectors(selectors)
     schema_lines = [
-        f"- {spec.field}: {spec.data_type} ({'required' if spec.required else 'optional'})"
-        for spec in selectors
+        _format_schema_line(spec.field, spec.data_type, spec.required, spec.attribute)
+        for spec in flat
     ]
+    for group_name, specs in groups.items():
+        item_selector = _resolve_item_selector(specs) or "MISSING_ITEM_SELECTOR"
+        schema_lines.append(f"- {group_name}: list (item selector: {item_selector})")
+        for spec in specs:
+            schema_lines.append(
+                _format_schema_line(
+                    spec.field,
+                    spec.data_type,
+                    spec.required,
+                    spec.attribute,
+                    indent="  ",
+                )
+            )
     schema = "\n".join(schema_lines)
     return (
         "Extract the fields below from the HTML. Provide CSS selectors for each extracted field "
-        "in `selectors`.\n\n"
+        "in `selectors`. For list fields, use keys like `<group>.<field>`.\n\n"
         f"Schema:\n{schema}\n\n"
         f"HTML:\n{html}"
     )
+
+
+def _format_schema_line(
+    field: str,
+    data_type: str,
+    required: bool,
+    attribute: str | None,
+    indent: str = "",
+) -> str:
+    suffix = f", attr={attribute}" if attribute else ""
+    return f"{indent}- {field}: {data_type} ({'required' if required else 'optional'}{suffix})"
 
 
 def _truncate_html(html: str) -> str:
@@ -120,16 +166,91 @@ def _truncate_html(html: str) -> str:
 def _infer_selectors(html: str, data: dict[str, Any], selectors: list[SelectorSpec]) -> dict[str, str]:
     tree = HTMLParser(html)
     inferred: dict[str, str] = {}
+    flat, groups = _split_selectors(selectors)
     nodes = tree.css("body *")
-    for spec in selectors:
+
+    for spec in flat:
         value = data.get(spec.field)
         if value is None:
             continue
-        text = str(value).strip()
-        if not text:
+        target = str(value).strip()
+        if not target:
             continue
         for node in nodes:
-            if node.text(strip=True) == text:
+            candidate = _node_value(node, spec)
+            if candidate is None:
+                continue
+            if str(candidate).strip() == target:
                 inferred[spec.field] = node.tag
                 break
+
+    for group_name, specs in groups.items():
+        item_selector = _resolve_item_selector(specs)
+        if not item_selector:
+            continue
+        data_items = data.get(group_name)
+        if not isinstance(data_items, list):
+            continue
+        item_nodes = tree.css(item_selector)
+        for idx, item_data in enumerate(data_items):
+            if idx >= len(item_nodes) or not isinstance(item_data, dict):
+                break
+            node_pool = [item_nodes[idx], *item_nodes[idx].css("*")]
+            for spec in specs:
+                value = item_data.get(spec.field)
+                if value is None:
+                    continue
+                target = str(value).strip()
+                if not target:
+                    continue
+                key = f"{group_name}.{spec.field}"
+                if key in inferred:
+                    continue
+                for node in node_pool:
+                    candidate = _node_value(node, spec)
+                    if candidate is None:
+                        continue
+                    if str(candidate).strip() == target:
+                        inferred[key] = node.tag
+                        break
     return inferred
+
+
+def _node_value(node, spec: SelectorSpec) -> str | None:
+    if spec.attribute:
+        return node.attributes.get(spec.attribute)
+    return node.text(strip=True)
+
+
+def _split_selectors(
+    selectors: list[SelectorSpec],
+) -> tuple[list[SelectorSpec], dict[str, list[SelectorSpec]]]:
+    flat: list[SelectorSpec] = []
+    groups: dict[str, list[SelectorSpec]] = {}
+    for spec in selectors:
+        if spec.group_name:
+            groups.setdefault(spec.group_name, []).append(spec)
+        else:
+            flat.append(spec)
+    return flat, groups
+
+
+def _resolve_item_selector(specs: list[SelectorSpec]) -> str | None:
+    selectors = {spec.item_selector for spec in specs if spec.item_selector}
+    if len(selectors) == 1:
+        return selectors.pop()
+    return None
+
+
+def _safe_model_name(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in value)
+    return cleaned[:48] or "Group"
+
+
+def _allowed_selector_keys(selectors: list[SelectorSpec]) -> set[str]:
+    flat, groups = _split_selectors(selectors)
+    keys = {spec.field for spec in flat}
+    for group_name, specs in groups.items():
+        for spec in specs:
+            keys.add(f"{group_name}.{spec.field}")
+    return keys
