@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     browser_wait_until: str = "networkidle"
     browser_wait_for_selector: str | None = None
     browser_wait_for_ms: int = 0
+    browser_scroll_steps: int = 0
+    browser_scroll_delay_ms: int = 0
+    browser_scroll_container_selector: str | None = None
+    browser_collect_max_items: int = 0
+    browser_pagination_max_pages: int = 1
+    browser_pagination_next_selector: str | None = None
+    browser_pagination_param: str | None = None
+    browser_pagination_start: int = 1
+    browser_pagination_step: int = 1
+    browser_pagination_template: str | None = None
     browser_headless: bool = True
     browser_full_page: bool = True
 
