@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
+import sys
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -19,6 +21,8 @@ from scraper.llm_recovery import recover_with_llm
 from scraper.parsing import parse_html
 from scraper.selector_registry import load_selectors_async, record_candidates_async
 
+logger = logging.getLogger(__name__)
+
 
 async def run_browser_engine(job_id: UUID) -> EngineOutcome:
     async with async_session() as session:
@@ -33,6 +37,38 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
     selectors = await load_selectors_async(job.schema_id)
     if not selectors:
         return await _mark_failed(job_id, "no_selectors")
+
+    logger.info(
+        "Browser settings: timeout_ms=%s wait_until=%s wait_for_selector=%s wait_for_ms=%s headless=%s full_page=%s",
+        settings.browser_timeout_ms,
+        settings.browser_wait_until,
+        settings.browser_wait_for_selector,
+        settings.browser_wait_for_ms,
+        settings.browser_headless,
+        settings.browser_full_page,
+    )
+    print(
+        "BROWSER_SETTINGS",
+        settings.browser_timeout_ms,
+        settings.browser_wait_until,
+        settings.browser_wait_for_selector,
+        settings.browser_wait_for_ms,
+        settings.browser_headless,
+        settings.browser_full_page,
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        "BROWSER_ENV",
+        os.environ.get("BROWSER_TIMEOUT_MS"),
+        os.environ.get("BROWSER_WAIT_UNTIL"),
+        os.environ.get("BROWSER_WAIT_FOR_SELECTOR"),
+        os.environ.get("BROWSER_WAIT_FOR_MS"),
+        os.environ.get("BROWSER_HEADLESS"),
+        os.environ.get("BROWSER_FULL_PAGE"),
+        file=sys.stderr,
+        flush=True,
+    )
 
     store = ArtifactStore()
     html = None
