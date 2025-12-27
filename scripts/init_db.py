@@ -13,6 +13,8 @@ SRC_ROOT = os.path.join(PROJECT_ROOT, "src")
 if SRC_ROOT not in sys.path:
     sys.path.append(SRC_ROOT)
 
+from sqlalchemy import text
+
 from core.db import engine
 from core.models import Base
 
@@ -20,6 +22,33 @@ from core.models import Base
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS selectors ADD COLUMN IF NOT EXISTS group_name VARCHAR(128)")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS selectors ADD COLUMN IF NOT EXISTS item_selector TEXT")
+        )
+        await conn.execute(
+            text("ALTER TABLE IF EXISTS selectors ADD COLUMN IF NOT EXISTS attribute VARCHAR(128)")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS selector_candidates "
+                "ADD COLUMN IF NOT EXISTS group_name VARCHAR(128)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS selector_candidates "
+                "ADD COLUMN IF NOT EXISTS item_selector TEXT"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS selector_candidates "
+                "ADD COLUMN IF NOT EXISTS attribute VARCHAR(128)"
+            )
+        )
 
 
 def main() -> None:
