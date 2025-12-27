@@ -7,8 +7,9 @@ from scrapy.exceptions import CloseSpider
 from sqlalchemy import select
 
 from core.db_sync import get_sync_session
-from core.models import Job, Selector
-from scraper.parsing import SelectorSpec, parse_html
+from core.models import Job
+from scraper.parsing import parse_html
+from scraper.selector_registry import load_selectors_sync
 
 
 class ProteusSpider(Spider):
@@ -19,7 +20,7 @@ class ProteusSpider(Spider):
         self.job_id = job_id
         self.start_url = url
         self.schema_id = schema_id
-        self.selectors = self._load_selectors()
+        self.selectors = load_selectors_sync(self.schema_id)
         if not self.selectors:
             self._mark_job_failed("no_selectors")
             raise CloseSpider("no_selectors")
@@ -36,23 +37,6 @@ class ProteusSpider(Spider):
             "data": data,
             "errors": errors,
         }
-
-    def _load_selectors(self) -> list[SelectorSpec]:
-        with get_sync_session() as session:
-            result = session.execute(
-                select(Selector)
-                .where(Selector.schema_id == self.schema_id)
-                .where(Selector.active.is_(True))
-            )
-            return [
-                SelectorSpec(
-                    field=row.field,
-                    selector=row.selector,
-                    data_type=row.data_type,
-                    required=row.required,
-                )
-                for row in result.scalars().all()
-            ]
 
     def _mark_job_failed(self, reason: str) -> None:
         with get_sync_session() as session:
