@@ -75,3 +75,25 @@ class Selector(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+
+
+class SelectorCandidate(Base):
+    __tablename__ = "selector_candidates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    schema_id: Mapped[str] = mapped_column(String(128), index=True)
+    field: Mapped[str] = mapped_column(String(128), nullable=False)
+    selector: Mapped[str] = mapped_column(Text, nullable=False)
+    data_type: Mapped[str] = mapped_column(String(32), nullable=False, default="string")
+    required: Mapped[bool] = mapped_column(default=True)
+    success_count: Mapped[int] = mapped_column(default=0)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
