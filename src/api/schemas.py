@@ -89,16 +89,22 @@ class SchemaOut(BaseModel):
 
 
 class SelectorCreate(BaseModel):
+    group_name: str | None = None
     field: str = Field(..., min_length=1)
     selector: str = Field(..., min_length=1)
+    item_selector: str | None = None
+    attribute: str | None = None
     data_type: str = "string"
     required: bool = True
     active: bool = True
 
 
 class SelectorUpdate(BaseModel):
+    group_name: str | None = None
     field: str | None = None
     selector: str | None = None
+    item_selector: str | None = None
+    attribute: str | None = None
     data_type: str | None = None
     required: bool | None = None
     active: bool | None = None
@@ -107,8 +113,11 @@ class SelectorUpdate(BaseModel):
 class SelectorOut(BaseModel):
     id: str
     schema_id: str
+    group_name: str | None = None
     field: str
     selector: str
+    item_selector: str | None = None
+    attribute: str | None = None
     data_type: str
     required: bool
     active: bool
