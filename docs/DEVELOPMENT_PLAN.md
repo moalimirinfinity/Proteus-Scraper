@@ -102,42 +102,56 @@ Acceptance criteria:
 - ✅ Candidates recorded and promoted after verification threshold.
 - ✅ List-page recovery records candidates with group/item/attribute context.
 
-## Phase 5: Governance and Cost Controls
+## Phase 5: Governance and Cost Controls ✅
 Goal: Centralize global safety policies for distributed workers.
 
 Deliverables:
-- Redis token bucket rate limits per domain.
-- Circuit breaker logic for ban spikes (403/429).
-- LLM budget guardrails per job and per tenant.
+- ✅ Redis token bucket rate limits per domain.
+- ✅ Circuit breaker logic for ban spikes (403/429).
+- ✅ LLM budget guardrails per job and per tenant.
 
 Acceptance criteria:
-- Requests across multiple workers respect a global rate.
-- Breaker trips and pauses domains after threshold.
-- LLM calls stop when budget exceeded.
+- ✅ Requests across multiple workers respect a global rate.
+- ✅ Breaker trips and pauses domains after threshold.
+- ✅ LLM calls stop when budget exceeded.
 
-## Phase 6: Identity and Session Management
+## Phase 6: Identity and Session Management ✅
 Goal: Treat identity as a managed resource.
 
 Deliverables:
-- Cookie jar storage (encrypted at rest).
-- Fingerprint pool definitions per tenant.
-- Identity rotation based on usage and failure.
+- ✅ Cookie jar storage (encrypted at rest).
+- ✅ Fingerprint pool definitions per tenant.
+- ✅ Identity rotation based on usage and failure.
+- ✅ Identity CRUD API for managing fingerprints + cookies.
 
 Acceptance criteria:
-- Authenticated scraping works without repeated login.
-- Identity rotation reduces repeated bans on target.
+- ✅ Authenticated scraping works without repeated login.
+- ✅ Identity rotation reduces repeated bans on target.
 
-## Phase 7: Observability and Mission Control
+## Phase 7: Observability and Mission Control ✅
 Goal: Full visibility across extraction and infrastructure.
 
 Deliverables:
-- Prometheus metrics for jobs, failures, latency, LLM costs.
-- Grafana dashboards for success rate and ban spikes.
-- Log aggregation via Loki.
+- ✅ Prometheus metrics for jobs, failures, latency, LLM costs.
+- ✅ Grafana dashboards for success rate and ban spikes.
+- ✅ Log aggregation via Loki.
 
 Acceptance criteria:
-- Dashboards show domain success rate and proxy health.
-- Alerts trigger on ban spikes or budget overruns.
+- ✅ Dashboards show domain success rate and proxy health.
+- ✅ Alerts trigger on ban spikes or budget overruns.
+
+## Phase 7.1: Control Panel (Web UI) ✅
+Goal: Make the system usable without direct DB edits or raw API calls.
+
+Deliverables:
+- ✅ Web dashboard to submit a URL and run preview jobs.
+- ✅ Visual selector builder to generate schema JSON (click + highlight).
+- ✅ "Quarantine" view for broken selectors and LLM candidates.
+
+Acceptance criteria:
+- ✅ Non-technical users can create a schema without SQL.
+- ✅ Preview results show data + artifacts in the UI.
+- ✅ Quarantine view allows promoting or rejecting candidates.
 
 ## Phase 8: Network Infrastructure
 Goal: Decouple proxy logic from code.
@@ -151,6 +165,18 @@ Acceptance criteria:
 - Workers route traffic through the gateway by default.
 - Proxy provider switching does not require code changes.
 
+## Phase 8.1: Extensibility and Plugin Interface
+Goal: Allow new capabilities without modifying core code.
+
+Deliverables:
+- ❌ Plugin/middleware interface for request/response hooks.
+- ❌ Plugin discovery and safe loading from `plugins/`.
+- ❌ Reference plugins (e.g., PDF parser, custom headers).
+
+Acceptance criteria:
+- ❌ Custom logic can be added via a plugin without touching core modules.
+- ❌ Plugins can be enabled per schema or tenant.
+
 ## Phase 9: Human-Like Interaction and Vision
 Goal: Reduce bot detection and external API cost.
 
@@ -162,6 +188,20 @@ Deliverables:
 Acceptance criteria:
 - Protected UI flows succeed more often with human-like interaction.
 - OCR handles image-encoded data without external APIs.
+
+## Phase 9.1: Solver Pipeline (CAPTCHA and Challenges)
+Goal: Provide a standard solver interface for hard challenges (reCAPTCHA/Turnstile).
+
+Deliverables:
+- ❌ Challenge detection signals and pause/resume flow in BrowserEngine.
+- ❌ Solver interface (external API or human-in-the-loop).
+- ❌ Token injection and session resume in the browser context.
+- ❌ Solver cost/latency tracking and timeouts.
+
+Acceptance criteria:
+- ❌ Challenges can be routed to a configured solver.
+- ❌ Successful solves resume the job without a restart.
+- ❌ Failures are recorded with explicit reason codes.
 
 ## Phase 10: Data Lake and Time-Travel Storage
 Goal: Turn scraping into longitudinal intelligence.
@@ -205,8 +245,11 @@ Acceptance criteria:
 ## Cross-Cutting Workstreams
 - **Schema Registry**: ✅ Schema registry (Schema model exists), ✅ selector sets (grouped + attribute selectors), ✅ CRUD + preview endpoint, ❌ migration path (Alembic configured but no migrations), ✅ validation rules (Pydantic schemas).
 - **Config Service**: ❌ Domain policies, ✅ selector sets (database-driven), ❌ routing rules (basic engine selection only).
-- **Multi-Tenancy**: ❌ Per-tenant budgets, ❌ rate limits, ❌ identity pools (tenant field exists but no implementation).
+- **Multi-Tenancy**: ✅ Per-tenant LLM budgets, ❌ per-tenant rate limits, ✅ identity pools per tenant, ❌ tenant isolation (row-level or schema split).
 - **Security**: ❌ SSRF protection, ❌ allow/deny lists, ❌ audit logging (basic logging only).
+- **Control Panel**: ✅ Preview UI, ✅ selector builder, ✅ selector quarantine workflow.
+- **Extensibility**: ❌ Plugin interface, ❌ plugin sandboxing, ❌ plugin registry.
+- **Solver Pipeline**: ❌ Challenge detection, ❌ solver adapters, ❌ resume flow.
 
 ## Dependencies and Order
 - Phases 1-2 are prerequisites for any engine or AI work.
@@ -235,6 +278,9 @@ Acceptance criteria:
 - ✅ Schema/selector CRUD + preview endpoint.
 - ✅ List extraction + attribute selectors.
 - ✅ BrowserEngine with Playwright.
+- ✅ List pagination/scroll aggregation.
 - ✅ LLM recovery with selector candidate promotion.
 - ✅ Artifact storage to MinIO/S3.
-- ❌ Minimal observability (basic logging only, no metrics).
+- ✅ Governance (rate limits + circuit breaker + LLM budgets).
+- ✅ Identity management (encrypted cookies + fingerprints).
+- ✅ Observability stack (Prometheus/Grafana/Loki) with baseline alerts.
