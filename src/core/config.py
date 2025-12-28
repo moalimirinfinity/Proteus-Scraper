@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_timeout_ms: int = 30000
     llm_max_html_chars: int = 12000
+    identity_encryption_key: str | None = None
+    identity_failure_threshold: int = 3
+    llm_job_max_calls: int = 1
+    llm_job_window_sec: int = 3600
+    llm_tenant_max_calls: int = 1000
+    llm_tenant_window_sec: int = 86400
     selector_promotion_threshold: int = 3
     engine_queue: str = "engine:fast"
     browser_timeout_ms: int = 30000
@@ -38,6 +44,19 @@ class Settings(BaseSettings):
     browser_pagination_template: str | None = None
     browser_headless: bool = True
     browser_full_page: bool = True
+
+    metrics_enabled: bool = True
+    metrics_host: str = "0.0.0.0"
+    metrics_port_dispatcher: int = 8002
+    metrics_port_worker: int = 8003
+    preview_html_max_chars: int = 500000
+
+    rate_limit_capacity: int = 0
+    rate_limit_refill_per_sec: float = 0.0
+    rate_limit_max_wait_ms: int = 0
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_window_sec: int = 60
+    circuit_breaker_cooldown_sec: int = 300
 
     model_config = SettingsConfigDict(
         env_file=".env",
