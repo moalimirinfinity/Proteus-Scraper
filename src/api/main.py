@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Response
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from api.routes import router
@@ -9,6 +10,7 @@ from core.redis import close_redis
 def create_app() -> FastAPI:
     app = FastAPI(title="Proteus-Scraper API")
     app.include_router(router)
+    app.mount("/ui", StaticFiles(directory="web", html=True), name="ui")
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
