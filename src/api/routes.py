@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+from urllib.request import Request, urlopen
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -18,14 +21,19 @@ from api.schemas import (
     IdentityCreate,
     IdentityOut,
     IdentityUpdate,
+    PreviewHtmlRequest,
+    PreviewHtmlResponse,
     PreviewRequest,
     SchemaCreate,
     SchemaOut,
     SchemaUpdate,
     SelectorCreate,
+    SelectorCandidateOut,
     SelectorOut,
     SelectorUpdate,
 )
+from core.artifacts import ArtifactStore
+from core.config import settings
 from core.db import get_session
 from core.identity_crypto import IdentityCryptoError, encrypt_payload
 from core.metrics import record_job_state
@@ -33,6 +41,8 @@ from core.models import Artifact, Identity, Job, Schema, Selector, SelectorCandi
 from core.queues import enqueue_priority
 from core.redis import get_redis
 from core.tasks import process_job, select_engine
+from core.governance import guard_request_async
+from scraper.browser_engine import render_preview_html
 
 router = APIRouter()
 
@@ -99,6 +109,24 @@ def _identity_out(identity: Identity) -> IdentityOut:
         last_failed_at=identity.last_failed_at,
         created_at=identity.created_at,
         updated_at=identity.updated_at,
+    )
+
+
+def _candidate_out(candidate: SelectorCandidate) -> SelectorCandidateOut:
+    return SelectorCandidateOut(
+        id=str(candidate.id),
+        schema_id=candidate.schema_id,
+        group_name=candidate.group_name,
+        field=candidate.field,
+        selector=candidate.selector,
+        item_selector=candidate.item_selector,
+        attribute=candidate.attribute,
+        data_type=candidate.data_type,
+        required=candidate.required,
+        success_count=candidate.success_count,
+        promoted_at=candidate.promoted_at,
+        created_at=candidate.created_at,
+        updated_at=candidate.updated_at,
     )
 
 
@@ -180,6 +208,56 @@ async def get_results(
         data=job.result,
         artifacts=artifacts,
         error=job.error,
+    )
+
+
+@router.get("/artifacts/{artifact_id}")
+async def get_artifact(
+    artifact_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    result = await session.execute(select(Artifact).where(Artifact.id == artifact_id))
+    artifact = result.scalar_one_or_none()
+    if artifact is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+
+    content_type = {
+        "html": "text/html",
+        "screenshot": "image/png",
+        "har": "application/json",
+    }.get(artifact.type, "application/octet-stream")
+    store = ArtifactStore()
+    try:
+        data = store.load_bytes(artifact.location)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+    return Response(data, media_type=content_type)
+
+
+@router.post("/preview/html", response_model=PreviewHtmlResponse)
+async def preview_html(payload: PreviewHtmlRequest) -> PreviewHtmlResponse:
+    engine_value = payload.engine.value if payload.engine else select_engine(payload.url)
+    engine = EngineType(engine_value)
+    if engine == EngineType.browser:
+        html, _, _ = await render_preview_html(payload.url, payload.tenant)
+    else:
+        redis = get_redis()
+        error = await guard_request_async(redis, payload.url)
+        if error:
+            status_code = (
+                status.HTTP_429_TOO_MANY_REQUESTS
+                if error == "rate_limited"
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+            raise HTTPException(status_code=status_code, detail=error)
+        max_chars = settings.preview_html_max_chars
+        html = await asyncio.to_thread(_fetch_html, payload.url, max_chars + 1)
+    truncated_html, truncated = _truncate_html(html, settings.preview_html_max_chars)
+    return PreviewHtmlResponse(
+        url=payload.url,
+        engine=engine,
+        html=truncated_html,
+        truncated=truncated,
     )
 
 
@@ -302,6 +380,89 @@ async def list_selectors(
         if schema_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="schema not found")
     return [_selector_out(selector) for selector in selectors]
+
+
+@router.get("/schemas/{schema_id}/candidates", response_model=list[SelectorCandidateOut])
+async def list_selector_candidates(
+    schema_id: str,
+    include_promoted: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> list[SelectorCandidateOut]:
+    query = select(SelectorCandidate).where(SelectorCandidate.schema_id == schema_id)
+    if not include_promoted:
+        query = query.where(SelectorCandidate.promoted_at.is_(None))
+    query = query.order_by(SelectorCandidate.created_at.desc())
+    result = await session.execute(query)
+    return [_candidate_out(candidate) for candidate in result.scalars().all()]
+
+
+@router.post(
+    "/schemas/{schema_id}/candidates/{candidate_id}/promote",
+    response_model=SelectorCandidateOut,
+)
+async def promote_selector_candidate(
+    schema_id: str,
+    candidate_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> SelectorCandidateOut:
+    result = await session.execute(
+        select(SelectorCandidate)
+        .where(SelectorCandidate.id == candidate_id)
+        .where(SelectorCandidate.schema_id == schema_id)
+    )
+    candidate = result.scalar_one_or_none()
+    if candidate is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="candidate not found")
+
+    existing = await session.execute(
+        select(Selector)
+        .where(Selector.schema_id == candidate.schema_id)
+        .where(Selector.group_name == candidate.group_name)
+        .where(Selector.field == candidate.field)
+        .where(Selector.selector == candidate.selector)
+        .where(Selector.item_selector == candidate.item_selector)
+        .where(Selector.attribute == candidate.attribute)
+        .where(Selector.active.is_(True))
+    )
+    if existing.scalar_one_or_none() is None:
+        session.add(
+            Selector(
+                schema_id=candidate.schema_id,
+                group_name=candidate.group_name,
+                field=candidate.field,
+                selector=candidate.selector,
+                item_selector=candidate.item_selector,
+                attribute=candidate.attribute,
+                data_type=candidate.data_type,
+                required=candidate.required,
+                active=True,
+            )
+        )
+
+    candidate.promoted_at = candidate.promoted_at or _now()
+    candidate.updated_at = _now()
+    await session.commit()
+    await session.refresh(candidate)
+    return _candidate_out(candidate)
+
+
+@router.delete("/schemas/{schema_id}/candidates/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_selector_candidate(
+    schema_id: str,
+    candidate_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    result = await session.execute(
+        select(SelectorCandidate)
+        .where(SelectorCandidate.id == candidate_id)
+        .where(SelectorCandidate.schema_id == schema_id)
+    )
+    candidate = result.scalar_one_or_none()
+    if candidate is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="candidate not found")
+    await session.delete(candidate)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -550,3 +711,20 @@ async def preview_schema(
         artifacts=artifacts,
         error=job.error,
     )
+
+
+def _truncate_html(html: str, max_chars: int) -> tuple[str, bool]:
+    if len(html) <= max_chars:
+        return html, False
+    return html[:max_chars], True
+
+
+def _fetch_html(url: str, max_chars: int) -> str:
+    request = Request(url, headers={"User-Agent": "ProteusPreview/1.0"})
+    with urlopen(request, timeout=15) as response:
+        data = response.read(max_chars)
+    return data.decode("utf-8", errors="ignore")
+
+
+def _now():
+    return datetime.now(timezone.utc)
