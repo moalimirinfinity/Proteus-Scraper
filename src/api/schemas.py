@@ -124,6 +124,64 @@ class SelectorOut(BaseModel):
     created_at: datetime | None = None
 
 
+class SelectorCandidateOut(BaseModel):
+    id: str
+    schema_id: str
+    group_name: str | None = None
+    field: str
+    selector: str
+    item_selector: str | None = None
+    attribute: str | None = None
+    data_type: str
+    required: bool
+    success_count: int
+    promoted_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class IdentityCreate(BaseModel):
+    tenant: str | None = None
+    label: str | None = None
+    fingerprint: dict[str, Any] | None = None
+    cookies: list[dict[str, Any]] | None = None
+    active: bool = True
+
+
+class IdentityUpdate(BaseModel):
+    label: str | None = None
+    fingerprint: dict[str, Any] | None = None
+    cookies: list[dict[str, Any]] | None = None
+    active: bool | None = None
+
+
+class IdentityOut(BaseModel):
+    id: str
+    tenant: str
+    label: str | None = None
+    fingerprint: dict[str, Any] | None = None
+    active: bool
+    use_count: int
+    failure_count: int
+    last_used_at: datetime | None = None
+    last_failed_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class PreviewHtmlRequest(BaseModel):
+    url: str = Field(..., min_length=1)
+    engine: EngineType | None = None
+    tenant: str | None = None
+
+
+class PreviewHtmlResponse(BaseModel):
+    url: str
+    engine: EngineType
+    html: str
+    truncated: bool = False
+
+
 class PreviewRequest(BaseModel):
     url: str = Field(..., min_length=1)
     engine: EngineType | None = None
