@@ -17,6 +17,20 @@ from sqlalchemy import select
 from core.artifacts import ArtifactStore
 from core.config import settings
 from core.db import async_session
+from core.redis import get_redis
+from core.governance import (
+    GovernanceError,
+    allow_llm_call_async,
+    extract_domain,
+    guard_request_async,
+    record_failure_async,
+)
+from core.identities import (
+    IdentityContext,
+    acquire_identity_async,
+    record_identity_failure_async,
+    store_identity_cookies_async,
+)
 from core.models import Artifact, Job
 from scraper.engine import EngineOutcome
 from scraper.llm_recovery import recover_with_llm
@@ -24,6 +38,16 @@ from scraper.parsing import parse_html
 from scraper.selector_registry import load_selectors_async, record_candidates_async
 
 logger = logging.getLogger(__name__)
+
+
+async def render_preview_html(
+    url: str,
+    tenant: str | None = None,
+) -> tuple[str, bytes, bytes]:
+    redis = get_redis()
+    identity = await acquire_identity_async(tenant)
+    html, screenshot, har, _ = await _render_pages(url, redis, identity)
+    return html, screenshot, har
 
 
 async def run_browser_engine(job_id: UUID) -> EngineOutcome:
@@ -39,6 +63,9 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
     selectors = await load_selectors_async(job.schema_id)
     if not selectors:
         return await _mark_failed(job_id, "no_selectors")
+
+    redis = get_redis()
+    identity = await acquire_identity_async(job.tenant)
 
     logger.info(
         "Browser settings: timeout_ms=%s wait_until=%s wait_for_selector=%s wait_for_ms=%s scroll_steps=%s scroll_delay_ms=%s scroll_container=%s collect_max_items=%s pagination_max_pages=%s pagination_next_selector=%s pagination_param=%s pagination_start=%s pagination_step=%s pagination_template=%s headless=%s full_page=%s",
@@ -110,13 +137,17 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
 
     snapshots: list[tuple[str, str]] = []
     try:
-        html, screenshot_bytes, har_bytes, snapshots = await _render_pages(url)
+        html, screenshot_bytes, har_bytes, snapshots = await _render_pages(url, redis, identity)
+    except GovernanceError as exc:
+        error = exc.code
     except PlaywrightTimeoutError:
         error = "timeout"
     except Exception:
         error = "navigation_failed"
 
     if error:
+        if identity:
+            await record_identity_failure_async(identity.id, error)
         await _update_job(job_id, None, error, store)
         return EngineOutcome(success=False, error=error)
 
@@ -125,7 +156,12 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
     else:
         data, errors = parse_html(html or "", selectors, base_url=url)
     if errors:
-        llm_result = await asyncio.to_thread(recover_with_llm, html or "", selectors)
+        budget_allowed = await allow_llm_call_async(redis, str(job.id), job.tenant)
+        if not budget_allowed:
+            error = "llm_budget_exceeded"
+            await _update_job(job_id, None, error, store, html, screenshot_bytes, har_bytes)
+            return EngineOutcome(success=False, error=error)
+        llm_result = await asyncio.to_thread(recover_with_llm, html or "", selectors, job.tenant)
         if llm_result.success and llm_result.data is not None:
             await record_candidates_async(job.schema_id, selectors, llm_result.selectors or {})
             await _update_job(job_id, llm_result.data, None, store, html, screenshot_bytes, har_bytes)
@@ -139,7 +175,11 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
     return EngineOutcome(success=True, error=None)
 
 
-async def _render_pages(url: str) -> tuple[str, bytes, bytes, list[tuple[str, str]]]:
+async def _render_pages(
+    url: str,
+    redis,
+    identity: IdentityContext | None,
+) -> tuple[str, bytes, bytes, list[tuple[str, str]]]:
     html = ""
     snapshots: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,12 +188,22 @@ async def _render_pages(url: str) -> tuple[str, bytes, bytes, list[tuple[str, st
             browser = await playwright.chromium.launch(headless=settings.browser_headless)
             context = None
             try:
-                context = await browser.new_context(record_har_path=har_path)
+                context_kwargs = {"record_har_path": har_path}
+                fingerprint = identity.fingerprint if identity else {}
+                context_kwargs.update(_context_kwargs_from_fingerprint(fingerprint))
+                context = await browser.new_context(**context_kwargs)
+                if identity and identity.cookies:
+                    cookies = _filter_context_cookies(identity.cookies)
+                    if cookies:
+                        await context.add_cookies(cookies)
+                permissions = fingerprint.get("permissions") if isinstance(fingerprint, dict) else None
+                if permissions:
+                    await context.grant_permissions(permissions)
                 page = await context.new_page()
                 page_urls = _build_page_urls(url)
                 if page_urls:
                     for page_url in page_urls:
-                        page_snapshots = await _render_single_page(page, page_url)
+                        page_snapshots = await _render_single_page(page, page_url, redis)
                         snapshots.extend(page_snapshots)
                         if page_snapshots:
                             html = page_snapshots[-1][0]
@@ -164,7 +214,7 @@ async def _render_pages(url: str) -> tuple[str, bytes, bytes, list[tuple[str, st
                         if current_url in visited:
                             break
                         visited.add(current_url)
-                        page_snapshots = await _render_single_page(page, current_url)
+                        page_snapshots = await _render_single_page(page, current_url, redis)
                         snapshots.extend(page_snapshots)
                         if page_snapshots:
                             html = page_snapshots[-1][0]
@@ -177,6 +227,8 @@ async def _render_pages(url: str) -> tuple[str, bytes, bytes, list[tuple[str, st
 
                 if not html and snapshots:
                     html = snapshots[-1][0]
+                if identity:
+                    await store_identity_cookies_async(identity.id, await context.cookies())
                 screenshot = await page.screenshot(full_page=settings.browser_full_page)
             finally:
                 if context is not None:
@@ -189,12 +241,20 @@ async def _render_pages(url: str) -> tuple[str, bytes, bytes, list[tuple[str, st
     return html, screenshot, har_bytes, snapshots
 
 
-async def _render_single_page(page, url: str) -> list[tuple[str, str]]:
-    await page.goto(
+async def _render_single_page(page, url: str, redis) -> list[tuple[str, str]]:
+    error = await guard_request_async(redis, url)
+    if error:
+        raise GovernanceError(error)
+    domain = extract_domain(url)
+    response = await page.goto(
         url,
         wait_until=settings.browser_wait_until,
         timeout=settings.browser_timeout_ms,
     )
+    status = response.status if response else None
+    if domain and status in {403, 429}:
+        await record_failure_async(redis, domain, status)
+        raise GovernanceError(f"http_{status}")
     if settings.browser_wait_for_selector:
         await page.wait_for_selector(
             settings.browser_wait_for_selector,
@@ -273,6 +333,51 @@ def _build_page_urls(base_url: str) -> list[str] | None:
             for page in range(start, start + max_pages * step, step)
         ]
     return None
+
+
+def _context_kwargs_from_fingerprint(fingerprint: dict) -> dict:
+    if not isinstance(fingerprint, dict):
+        return {}
+    kwargs: dict = {}
+    user_agent = fingerprint.get("user_agent")
+    if user_agent:
+        kwargs["user_agent"] = user_agent
+    viewport = fingerprint.get("viewport")
+    if isinstance(viewport, dict):
+        kwargs["viewport"] = viewport
+    locale = fingerprint.get("locale")
+    if locale:
+        kwargs["locale"] = locale
+    timezone_id = fingerprint.get("timezone_id")
+    if timezone_id:
+        kwargs["timezone_id"] = timezone_id
+    geolocation = fingerprint.get("geolocation")
+    if isinstance(geolocation, dict):
+        kwargs["geolocation"] = geolocation
+    headers = fingerprint.get("headers") or fingerprint.get("extra_http_headers")
+    if isinstance(headers, dict):
+        kwargs["extra_http_headers"] = headers
+    device_scale_factor = fingerprint.get("device_scale_factor")
+    if device_scale_factor is not None:
+        kwargs["device_scale_factor"] = device_scale_factor
+    is_mobile = fingerprint.get("is_mobile")
+    if is_mobile is not None:
+        kwargs["is_mobile"] = is_mobile
+    has_touch = fingerprint.get("has_touch")
+    if has_touch is not None:
+        kwargs["has_touch"] = has_touch
+    color_scheme = fingerprint.get("color_scheme")
+    if color_scheme:
+        kwargs["color_scheme"] = color_scheme
+    return kwargs
+
+
+def _filter_context_cookies(cookies: list[dict]) -> list[dict]:
+    return [
+        cookie
+        for cookie in cookies
+        if isinstance(cookie, dict) and (cookie.get("url") or cookie.get("domain"))
+    ]
 
 
 def _set_query_param(url: str, param: str, value: int) -> str:
