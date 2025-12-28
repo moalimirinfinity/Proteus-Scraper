@@ -1,4 +1,4 @@
-.PHONY: up down test init dev stop
+.PHONY: up down test init dev stop obs-up obs-down
 
 POETRY ?= poetry
 
@@ -18,10 +18,16 @@ init:
 dev: up init
 	$(POETRY) run playwright install
 	nohup $(POETRY) run uvicorn api.main:app --reload > /tmp/proteus-api.log 2>&1 &
-	nohup $(POETRY) run arq core.tasks.DispatcherWorkerSettings > /tmp/proteus-dispatcher.log 2>&1 &
-	nohup env ENGINE_QUEUE=engine:fast $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-fast.log 2>&1 &
-	nohup env ENGINE_QUEUE=engine:browser $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-browser.log 2>&1 &
+	nohup env METRICS_PORT=8002 $(POETRY) run arq core.tasks.DispatcherWorkerSettings > /tmp/proteus-dispatcher.log 2>&1 &
+	nohup env METRICS_PORT=8003 ENGINE_QUEUE=engine:fast $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-fast.log 2>&1 &
+	nohup env METRICS_PORT=8004 ENGINE_QUEUE=engine:browser $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-browser.log 2>&1 &
 
 stop:
 	pkill -f "uvicorn api.main" || true
 	pkill -f "arq core.tasks" || true
+
+obs-up:
+	docker-compose -f deploy/observability/docker-compose.yml up -d
+
+obs-down:
+	docker-compose -f deploy/observability/docker-compose.yml down
