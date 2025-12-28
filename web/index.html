@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Proteus Control Panel</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <header class="header">
+      <div>
+        <p class="eyebrow">Proteus Control Panel</p>
+        <h1>Preview. Select. Extract.</h1>
+        <p class="subtitle">Build schemas visually and manage selector recovery without SQL.</p>
+      </div>
+      <div class="status-pill" id="status-pill">Idle</div>
+    </header>
+
+    <main class="layout">
+      <section class="card">
+        <div class="card-title">Preview and Selector Builder</div>
+        <div class="field-grid">
+          <label class="field">
+            <span>Target URL</span>
+            <input id="preview-url" placeholder="https://example.com" />
+          </label>
+          <label class="field">
+            <span>Engine</span>
+            <select id="preview-engine">
+              <option value="fast">fast</option>
+              <option value="browser">browser</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button class="primary" id="load-preview">Load HTML</button>
+            <button class="ghost" id="run-preview">Run Preview</button>
+          </div>
+        </div>
+
+        <div class="split">
+          <div class="pane">
+            <div class="pane-header">
+              <div class="mode-toggle">
+                <button id="mode-field" class="chip active">Pick field</button>
+                <button id="mode-item" class="chip">Pick item selector</button>
+              </div>
+              <div class="tiny" id="selected-selector">No selector selected</div>
+            </div>
+            <iframe id="preview-frame" title="preview" sandbox="allow-same-origin"></iframe>
+            <p class="tiny" id="preview-hint"></p>
+          </div>
+          <div class="pane">
+            <div class="pane-header">
+              <div class="tiny">Schema builder</div>
+            </div>
+            <div class="field-grid">
+              <label class="field">
+                <span>Schema ID</span>
+                <input id="schema-id" placeholder="example_schema" />
+              </label>
+              <label class="field">
+                <span>Group name (optional)</span>
+                <input id="group-name" placeholder="items" />
+              </label>
+              <label class="field">
+                <span>Item selector (optional)</span>
+                <input id="item-selector" placeholder=".card" />
+              </label>
+              <label class="field">
+                <span>Field name</span>
+                <input id="field-name" placeholder="title" />
+              </label>
+              <label class="field">
+                <span>Field selector</span>
+                <input id="field-selector" placeholder="h1" />
+              </label>
+              <label class="field">
+                <span>Attribute (optional)</span>
+                <input id="field-attribute" placeholder="href" />
+              </label>
+              <label class="field">
+                <span>Data type</span>
+                <select id="data-type">
+                  <option value="string">string</option>
+                  <option value="int">int</option>
+                  <option value="float">float</option>
+                  <option value="bool">bool</option>
+                </select>
+              </label>
+              <label class="field checkbox">
+                <input type="checkbox" id="field-required" checked />
+                <span>Required</span>
+              </label>
+            </div>
+            <div class="actions">
+              <button class="primary" id="add-selector">Add selector</button>
+              <button class="ghost" id="save-schema">Save schema + selectors</button>
+            </div>
+
+            <div class="list" id="selector-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Preview Results</div>
+        <div class="result-grid">
+          <div>
+            <p class="tiny">Extracted JSON</p>
+            <pre class="code" id="preview-json">{}</pre>
+          </div>
+          <div>
+            <p class="tiny">Artifacts</p>
+            <div class="artifact">
+              <img id="preview-screenshot" alt="screenshot preview" />
+              <div class="artifact-links" id="artifact-links"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Quarantine</div>
+        <div class="field-grid">
+          <label class="field">
+            <span>Schema ID</span>
+            <input id="quarantine-schema" placeholder="example_schema" />
+          </label>
+          <div class="actions">
+            <button class="primary" id="load-quarantine">Load candidates</button>
+          </div>
+        </div>
+        <div class="list" id="quarantine-list"></div>
+      </section>
+    </main>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>
