@@ -10,6 +10,7 @@ from pydantic import Field, create_model
 from selectolax.parser import HTMLParser
 
 from core.config import settings
+from core.metrics import record_llm_usage
 from scraper.parsing import SelectorSpec, normalize_data
 
 
@@ -21,7 +22,11 @@ class LLMRecoveryResult:
     error: str | None = None
 
 
-def recover_with_llm(html: str, selectors: list[SelectorSpec]) -> LLMRecoveryResult:
+def recover_with_llm(
+    html: str,
+    selectors: list[SelectorSpec],
+    tenant: str | None = None,
+) -> LLMRecoveryResult:
     if not settings.openai_api_key:
         return LLMRecoveryResult(success=False, error="llm_unavailable")
 
@@ -52,6 +57,7 @@ def recover_with_llm(html: str, selectors: list[SelectorSpec]) -> LLMRecoveryRes
                 },
             ],
         )
+        _record_usage(response, tenant)
     except Exception:
         return LLMRecoveryResult(success=False, error="llm_failed")
 
@@ -67,6 +73,15 @@ def recover_with_llm(html: str, selectors: list[SelectorSpec]) -> LLMRecoveryRes
         filtered = _infer_selectors(html_snippet, normalized, selectors)
 
     return LLMRecoveryResult(success=True, data=normalized, selectors=filtered, error=None)
+
+
+def _record_usage(response, tenant: str | None) -> None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        raw = getattr(response, "_raw_response", None)
+        usage = getattr(raw, "usage", None) if raw is not None else None
+    tokens = getattr(usage, "total_tokens", None) if usage is not None else None
+    record_llm_usage(settings.llm_model, tokens, tenant)
 
 
 def _build_response_model(selectors: list[SelectorSpec]):
