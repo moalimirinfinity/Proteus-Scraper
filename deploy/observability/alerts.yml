@@ -1,0 +1,20 @@
+groups:
+  - name: proteus.rules
+    rules:
+      - alert: ProteusBanSpike
+        expr: sum(rate(proteus_failures_total{reason=~"http_403|http_429"}[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ban spike detected"
+          description: "403/429 failures are spiking across domains."
+
+      - alert: ProteusLLMTokenSpike
+        expr: sum(rate(proteus_llm_tokens_total[5m])) > 5000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM token spike"
+          description: "LLM token usage is above expected baseline."
