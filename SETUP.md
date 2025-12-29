@@ -100,6 +100,19 @@ curl -X PATCH http://127.0.0.1:8000/schemas/example \
 To persist identity cookies/storage state, set:
 - `IDENTITY_ENCRYPTION_KEY` (required for encryption at rest)
 
+## Human-Like Browser + Vision (Optional)
+Enable ghost-cursor style mouse movement and local OCR/vision signals:
+- `BROWSER_HUMANIZE=true`
+- `VISION_OCR_ENABLED=true` (requires Tesseract + `pytesseract`)
+- `VISION_OCR_PROVIDER=tesseract` or `paddleocr`
+- `VISION_YOLO_ENABLED=true`
+- `VISION_YOLO_MODEL=yolov8n.pt`
+- `VISION_YOLO_CLASSES=person,traffic light` (set targets)
+
+OCR prerequisites:
+- macOS: `brew install tesseract`
+- Linux: `apt-get install tesseract-ocr`
+
 ## Auth + CSRF (Optional)
 If `AUTH_ENABLED=true` or tokens are configured, API/UI calls require auth.
 - API token: set `AUTH_API_TOKENS=token:tenant`

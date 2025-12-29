@@ -13,6 +13,7 @@ Core philosophy: speed by default, AI only when needed.
 - Enforce global governance (rate limits, circuit breakers, LLM + external budgets).
 - Rotate identities (cookies + fingerprints) and route traffic via proxy policies.
 - Escalate across tiers automatically when detectors see blocks.
+- Enable human-like browser behavior and local OCR/vision signals when needed.
 
 ## How It Works (Happy Path)
 1) Submit job -> API validates and persists the job.
@@ -33,7 +34,7 @@ Core philosophy: speed by default, AI only when needed.
 - Tier 2: curl_cffi for TLS/JA3-sensitive targets.
 - Tier 3: Playwright for JS-rendered or heavily dynamic pages.
 - Tier 4: External scraping API for hard blocks (budget + allowlist gated).
-- Escalation is driven by a detector (captcha markers, 403/429, blocked HTML).
+- Escalation is driven by a detector (captcha markers, 403/429, blocked HTML, OCR/vision signals).
 - Escalation records reason codes in `job_attempts` and respects max depth.
 - Identities stay sticky per domain until they burn, then rotate.
 
