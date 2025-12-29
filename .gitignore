@@ -1,4 +1,13 @@
 __pycache__/
 .DS_Store
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.py[cod]
+.coverage
+coverage.xml
+htmlcov/
 artifacts/
 /tmp/proteus-*.log
