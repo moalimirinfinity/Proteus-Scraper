@@ -31,6 +31,16 @@ from scraper.engine import EngineOutcome
 from scraper.external_providers import ExternalFetchResult, ExternalProviderError, get_external_provider
 from scraper.llm_recovery import recover_with_llm
 from scraper.parsing import parse_html
+from scraper.plugins import (
+    ParseContext,
+    RequestContext,
+    ResponseContext,
+    apply_parse_plugins,
+    apply_request_plugins,
+    apply_response_plugins,
+    load_plugins,
+    resolve_plugin_names,
+)
 from scraper.selector_registry import load_selectors_async, record_candidates_async
 
 
@@ -45,54 +55,108 @@ async def run_external_engine(job_id: UUID) -> EngineOutcome:
         url = job.url
         schema_id = job.schema_id
         tenant = job.tenant
+        plugin_names = await resolve_plugin_names(session, schema_id, tenant)
 
     selectors = await load_selectors_async(schema_id)
     if not selectors:
         return await _mark_failed(job_id, "no_selectors")
 
+    plugins, plugin_error = load_plugins(plugin_names)
+    if plugin_error:
+        return await _mark_failed(job_id, plugin_error)
+
     redis = get_redis()
     store = ArtifactStore()
     try:
-        result = await fetch_external_html(url, tenant)
+        request_ctx = RequestContext(
+            url=url,
+            headers={},
+            cookies=[],
+            proxy_url=None,
+            engine="external",
+            tenant=tenant,
+            schema_id=schema_id,
+            job_id=str(job_id),
+        )
+        request_ctx, error = apply_request_plugins(request_ctx, plugins)
+        if error:
+            return await _mark_failed(job_id, error)
+        result = await fetch_external_html(request_ctx.url, tenant)
     except ExternalProviderError as exc:
         return await _mark_failed(job_id, exc.code)
 
+    response_ctx = ResponseContext(
+        url=result.url or url,
+        status=result.status,
+        headers=result.headers,
+        body=result.html,
+        content=result.content,
+        content_type=result.content_type,
+        cookies=[],
+        truncated=False,
+        engine="external",
+        tenant=tenant,
+        schema_id=schema_id,
+        job_id=str(job_id),
+    )
+    response_ctx, error = apply_response_plugins(response_ctx, plugins)
+    if error:
+        return await _mark_failed(job_id, error, html=response_ctx.body)
+
     blocked_reason = detect_blocked_response(
-        result.status,
-        result.headers,
-        result.url or url,
-        result.html,
+        response_ctx.status,
+        response_ctx.headers,
+        response_ctx.url or url,
+        response_ctx.body,
     )
     if blocked_reason:
-        record_detector_signal(blocked_reason, "external", "pre_parse", result.url or url)
-        await _update_job(job_id, None, blocked_reason, store, html=result.html)
+        record_detector_signal(blocked_reason, "external", "pre_parse", response_ctx.url or url)
+        await _update_job(job_id, None, blocked_reason, store, html=response_ctx.body)
         return EngineOutcome(success=False, error=blocked_reason)
 
-    data, errors = parse_html(result.html, selectors, base_url=result.url)
-    empty_reason = detect_empty_parse(result.status, data, selectors, errors)
+    data, errors = parse_html(response_ctx.body, selectors, base_url=response_ctx.url)
+    parse_ctx = ParseContext(
+        data=data,
+        errors=errors,
+        engine="external",
+        tenant=tenant,
+        schema_id=schema_id,
+        job_id=str(job_id),
+    )
+    parse_ctx, error = apply_parse_plugins(parse_ctx, plugins)
+    if error:
+        return await _mark_failed(job_id, error, html=response_ctx.body)
+    data, errors = parse_ctx.data, parse_ctx.errors
+
+    empty_reason = detect_empty_parse(response_ctx.status, data, selectors, errors)
     if empty_reason:
-        record_detector_signal(empty_reason, "external", "post_parse", result.url or url)
-        await _update_job(job_id, None, empty_reason, store, html=result.html)
+        record_detector_signal(empty_reason, "external", "post_parse", response_ctx.url or url)
+        await _update_job(job_id, None, empty_reason, store, html=response_ctx.body)
         return EngineOutcome(success=False, error=empty_reason)
 
     if errors:
         budget_allowed = await allow_llm_call_async(redis, str(job_id), tenant)
         if not budget_allowed:
             error = "llm_budget_exceeded"
-            await _update_job(job_id, None, error, store, html=result.html)
+            await _update_job(job_id, None, error, store, html=response_ctx.body)
             return EngineOutcome(success=False, error=error)
 
-        llm_result = await asyncio.to_thread(recover_with_llm, result.html, selectors, tenant)
+        llm_result = await asyncio.to_thread(
+            recover_with_llm,
+            response_ctx.body,
+            selectors,
+            tenant,
+        )
         if llm_result.success and llm_result.data is not None:
             await record_candidates_async(schema_id, selectors, llm_result.selectors or {})
-            await _update_job(job_id, llm_result.data, None, store, html=result.html)
+            await _update_job(job_id, llm_result.data, None, store, html=response_ctx.body)
             return EngineOutcome(success=True, error=None)
 
         error = llm_result.error or "llm_failed"
-        await _update_job(job_id, None, error, store, html=result.html)
+        await _update_job(job_id, None, error, store, html=response_ctx.body)
         return EngineOutcome(success=False, error=error)
 
-    await _update_job(job_id, data, None, store, html=result.html)
+    await _update_job(job_id, data, None, store, html=response_ctx.body)
     return EngineOutcome(success=True, error=None)
 
 

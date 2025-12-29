@@ -34,6 +34,8 @@ from api.schemas import (
     SelectorCandidateOut,
     SelectorOut,
     SelectorUpdate,
+    TenantPluginsOut,
+    TenantPluginsUpdate,
 )
 from core.artifacts import ArtifactStore
 from core.config import settings
@@ -47,7 +49,16 @@ from core.identities import (
 )
 from core.identity_crypto import IdentityCryptoError, encrypt_payload
 from core.metrics import record_job_state
-from core.models import Artifact, Identity, Job, ProxyPolicy, Schema, Selector, SelectorCandidate
+from core.models import (
+    Artifact,
+    Identity,
+    Job,
+    ProxyPolicy,
+    Schema,
+    Selector,
+    SelectorCandidate,
+    TenantPluginConfig,
+)
 from core.queues import enqueue_priority
 from core.redis import get_redis
 from core.security import SecurityError, ensure_url_allowed
@@ -62,6 +73,14 @@ from scraper.fetcher import (
     filter_cookies_for_url,
     identity_headers,
     merge_cookies,
+)
+from scraper.plugins import (
+    RequestContext,
+    ResponseContext,
+    apply_request_plugins,
+    apply_response_plugins,
+    load_plugins,
+    resolve_plugin_names_async,
 )
 
 router = APIRouter()
@@ -119,11 +138,28 @@ def _coerce_priority(value: str) -> JobPriority:
         return JobPriority.standard
 
 
+def _normalize_plugins(value: list[str] | None) -> list[str]:
+    if not value:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for entry in value:
+        if entry is None:
+            continue
+        name = str(entry).strip().lower()
+        if not name or name in seen:
+            continue
+        normalized.append(name)
+        seen.add(name)
+    return normalized
+
+
 def _schema_out(schema: Schema) -> SchemaOut:
     return SchemaOut(
         schema_id=schema.id,
         name=schema.name,
         description=schema.description,
+        plugins=_normalize_plugins(schema.plugins),
         created_at=schema.created_at,
         updated_at=schema.updated_at,
     )
@@ -400,15 +436,52 @@ async def preview_html(payload: PreviewHtmlRequest, request: Request) -> Preview
     except SecurityError as exc:
         _raise_security_error(exc)
     tenant = resolve_tenant(request, payload.tenant)
+    plugin_names = await resolve_plugin_names_async(None, tenant)
+    plugins, plugin_error = load_plugins(plugin_names)
+    if plugin_error:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=plugin_error)
     engine_value = payload.engine.value if payload.engine else select_engine(payload.url)
     engine = EngineType(engine_value)
     if engine == EngineType.stealth and not is_stealth_allowed(payload.url):
         engine = EngineType.fast
     if engine == EngineType.browser:
         html, _, _ = await render_preview_html(payload.url, tenant)
+        response_ctx = ResponseContext(
+            url=payload.url,
+            status=None,
+            headers={},
+            body=html,
+            content=html.encode("utf-8", errors="ignore"),
+            content_type=None,
+            cookies=[],
+            truncated=False,
+            engine=engine.value,
+            tenant=tenant,
+        )
+        response_ctx, plugin_error = apply_response_plugins(response_ctx, plugins)
+        if plugin_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=plugin_error,
+            )
+        html = response_ctx.body
     elif engine == EngineType.external:
+        request_ctx = RequestContext(
+            url=payload.url,
+            headers={},
+            cookies=[],
+            proxy_url=None,
+            engine=engine.value,
+            tenant=tenant,
+        )
+        request_ctx, plugin_error = apply_request_plugins(request_ctx, plugins)
+        if plugin_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=plugin_error,
+            )
         try:
-            result = await fetch_external_html(payload.url, tenant)
+            result = await fetch_external_html(request_ctx.url, tenant)
         except ExternalProviderError as exc:
             detail = exc.code
             status_code = status.HTTP_403_FORBIDDEN if detail == "external_not_allowed" else None
@@ -425,7 +498,25 @@ async def preview_html(payload: PreviewHtmlRequest, request: Request) -> Preview
                 status_code=status_code or status.HTTP_502_BAD_GATEWAY,
                 detail=detail,
             ) from exc
-        html = result.html
+        response_ctx = ResponseContext(
+            url=result.url or request_ctx.url,
+            status=result.status,
+            headers=result.headers,
+            body=result.html,
+            content=result.content,
+            content_type=result.content_type,
+            cookies=[],
+            truncated=False,
+            engine=engine.value,
+            tenant=tenant,
+        )
+        response_ctx, plugin_error = apply_response_plugins(response_ctx, plugins)
+        if plugin_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=plugin_error,
+            )
+        html = response_ctx.body
     else:
         redis = get_redis()
         error = await guard_request_async(redis, payload.url)
@@ -444,19 +535,51 @@ async def preview_html(payload: PreviewHtmlRequest, request: Request) -> Preview
         )
         identity_cookies = list(identity.cookies) if identity else []
         request_cookies = filter_cookies_for_url(identity_cookies, payload.url)
+        request_ctx = RequestContext(
+            url=payload.url,
+            headers=headers,
+            cookies=request_cookies,
+            proxy_url=assignment.proxy_url,
+            engine=engine.value,
+            tenant=tenant,
+        )
+        request_ctx, plugin_error = apply_request_plugins(request_ctx, plugins)
+        if plugin_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=plugin_error,
+            )
+        if request_ctx.url != payload.url:
+            original_domain = extract_domain(payload.url)
+            new_domain = extract_domain(request_ctx.url)
+            if not original_domain or original_domain != new_domain:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="plugin_url_changed",
+                )
+            try:
+                await ensure_url_allowed(request_ctx.url)
+            except SecurityError as exc:
+                _raise_security_error(exc)
+            error = await guard_request_async(redis, request_ctx.url)
+            if error:
+                status_code = (
+                    status.HTTP_429_TOO_MANY_REQUESTS
+                    if error == "rate_limited"
+                    else status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+                raise HTTPException(status_code=status_code, detail=error)
         max_chars = settings.preview_html_max_chars
         backend = (
-            "stealth"
-            if engine == EngineType.stealth and is_stealth_allowed(payload.url)
-            else "fast"
+            "stealth" if engine == EngineType.stealth and is_stealth_allowed(request_ctx.url) else "fast"
         )
         try:
             result = await fetch_html(
-                payload.url,
+                request_ctx.url,
                 backend=backend,
-                headers=headers,
-                cookies=request_cookies,
-                proxy_url=assignment.proxy_url,
+                headers=request_ctx.headers,
+                cookies=request_ctx.cookies,
+                proxy_url=request_ctx.proxy_url,
                 timeout_ms=settings.fetch_timeout_ms,
                 max_bytes=max_chars + 1,
                 impersonate=settings.fetch_curl_impersonate,
@@ -467,26 +590,49 @@ async def preview_html(payload: PreviewHtmlRequest, request: Request) -> Preview
                 detail=exc.code,
             ) from exc
 
-        if identity and result.cookies:
-            merged = merge_cookies(identity_cookies, result.cookies)
+        response_ctx = ResponseContext(
+            url=result.url or request_ctx.url,
+            status=result.status,
+            headers=result.headers,
+            body=result.html,
+            content=result.content,
+            content_type=result.content_type,
+            cookies=result.cookies,
+            truncated=result.truncated,
+            engine=engine.value,
+            tenant=tenant,
+        )
+        response_ctx, plugin_error = apply_response_plugins(response_ctx, plugins)
+        if plugin_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=plugin_error,
+            )
+
+        if identity and response_ctx.cookies:
+            merged = merge_cookies(identity_cookies, response_ctx.cookies)
             if merged != identity_cookies:
                 await store_identity_cookies_async(identity.id, merged)
 
-        if result.status in {403, 429}:
-            domain = extract_domain(result.url or payload.url)
+        if response_ctx.status in {403, 429}:
+            domain = extract_domain(response_ctx.url or payload.url)
             if domain:
-                await record_failure_async(redis, domain, result.status)
+                await record_failure_async(redis, domain, response_ctx.status)
             if identity:
-                await record_identity_failure_async(identity.id, f"http_{result.status}", url=payload.url)
+                await record_identity_failure_async(
+                    identity.id,
+                    f"http_{response_ctx.status}",
+                    url=payload.url,
+                )
             raise HTTPException(
                 status_code=(
                     status.HTTP_429_TOO_MANY_REQUESTS
-                    if result.status == 429
+                    if response_ctx.status == 429
                     else status.HTTP_403_FORBIDDEN
                 ),
-                detail=f"http_{result.status}",
+                detail=f"http_{response_ctx.status}",
             )
-        html = result.html
+        html = response_ctx.body
     truncated_html, truncated = _truncate_html(html, settings.preview_html_max_chars)
     return PreviewHtmlResponse(
         url=payload.url,
@@ -512,6 +658,7 @@ async def create_schema(
         id=payload.schema_id,
         name=payload.name or payload.schema_id,
         description=payload.description,
+        plugins=_normalize_plugins(payload.plugins) or None,
     )
     session.add(schema)
     await session.commit()
@@ -574,10 +721,50 @@ async def update_schema(
         schema.name = payload.name
     if payload.description is not None:
         schema.description = payload.description
+    if payload.plugins is not None:
+        schema.plugins = _normalize_plugins(payload.plugins) or None
 
     await session.commit()
     await session.refresh(schema)
     return _schema_out(schema)
+
+
+@router.get("/tenants/{tenant}/plugins", response_model=TenantPluginsOut)
+async def get_tenant_plugins(
+    tenant: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TenantPluginsOut:
+    assert_tenant_access(request, tenant)
+    result = await session.execute(
+        select(TenantPluginConfig).where(TenantPluginConfig.tenant == tenant)
+    )
+    config = result.scalar_one_or_none()
+    plugins = _normalize_plugins(config.plugins if config else [])
+    return TenantPluginsOut(tenant=tenant, plugins=plugins)
+
+
+@router.put("/tenants/{tenant}/plugins", response_model=TenantPluginsOut)
+async def update_tenant_plugins(
+    tenant: str,
+    payload: TenantPluginsUpdate,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TenantPluginsOut:
+    assert_tenant_access(request, tenant)
+    result = await session.execute(
+        select(TenantPluginConfig).where(TenantPluginConfig.tenant == tenant)
+    )
+    config = result.scalar_one_or_none()
+    plugins = _normalize_plugins(payload.plugins) or None
+    if config is None:
+        config = TenantPluginConfig(tenant=tenant, plugins=plugins)
+        session.add(config)
+    else:
+        config.plugins = plugins
+    await session.commit()
+    await session.refresh(config)
+    return TenantPluginsOut(tenant=tenant, plugins=_normalize_plugins(config.plugins))
 
 
 @router.delete("/schemas/{schema_id}", status_code=status.HTTP_204_NO_CONTENT)

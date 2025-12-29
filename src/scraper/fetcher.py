@@ -32,6 +32,8 @@ class FetchResult:
     html: str
     headers: dict[str, str]
     cookies: list[dict[str, Any]]
+    content: bytes
+    content_type: str | None
     truncated: bool = False
 
 
@@ -340,6 +342,7 @@ async def _fetch_with_httpx(
             timeout=timeout,
         ) as response:
             status = response.status_code
+            content_type = response.headers.get("content-type")
             async for chunk in response.aiter_bytes():
                 if limit is not None and total + len(chunk) > limit:
                     remaining = limit - total
@@ -347,21 +350,23 @@ async def _fetch_with_httpx(
                         buffer.append(chunk[:remaining])
                         total += remaining
                         truncated = True
-                        break
+                    break
                 buffer.append(chunk)
                 total += len(chunk)
-                content = b"".join(buffer)
-                encoding = response.encoding or "utf-8"
-                html = content.decode(encoding, errors="ignore")
-                cookies_out = _extract_cookie_list(response.cookies.jar)
-                return FetchResult(
-                    url=str(response.url),
-                    status=status,
-                    html=html,
-                    headers={str(k): str(v) for k, v in response.headers.items()},
-                    cookies=cookies_out,
-                    truncated=truncated,
-                )
+            content = b"".join(buffer)
+            encoding = response.encoding or "utf-8"
+            html = content.decode(encoding, errors="ignore")
+            cookies_out = _extract_cookie_list(response.cookies.jar)
+            return FetchResult(
+                url=str(response.url),
+                status=status,
+                html=html,
+                headers={str(k): str(v) for k, v in response.headers.items()},
+                cookies=cookies_out,
+                content=content,
+                content_type=str(content_type) if content_type else None,
+                truncated=truncated,
+            )
     except httpx.TimeoutException as exc:
         logger.warning("fetch_timeout: %s", exc)
         raise FetcherError("timeout") from exc
@@ -417,12 +422,19 @@ async def _fetch_with_curl_cffi(
             html = content.decode(encoding, errors="ignore")
             cookie_jar = getattr(response.cookies, "jar", response.cookies)
             cookies_out = _extract_cookie_list(cookie_jar)
+            content_type = None
+            try:
+                content_type = response.headers.get("content-type")
+            except Exception:
+                content_type = None
             return FetchResult(
                 url=str(response.url),
                 status=status,
                 html=html,
                 headers={str(k): str(v) for k, v in response.headers.items()},
                 cookies=cookies_out,
+                content=content,
+                content_type=str(content_type) if content_type else None,
                 truncated=truncated,
             )
     except Exception as exc:

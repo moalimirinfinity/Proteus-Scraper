@@ -14,6 +14,8 @@ class ExternalFetchResult:
     status: int | None
     html: str
     headers: dict[str, str]
+    content: bytes
+    content_type: str | None
     provider: str
     cost: float
 
@@ -59,11 +61,14 @@ class ScrapflyProvider(ExternalProvider):
         status = result.get("status_code")
         cost = _extract_cost(payload, response.headers)
         headers = _normalize_headers(result.get("response_headers"))
+        content_type = headers.get("content-type") or headers.get("Content-Type")
         return ExternalFetchResult(
             url=str(result.get("url") or url),
             status=_coerce_status(status),
             html=html,
             headers=headers,
+            content=html.encode("utf-8", errors="ignore"),
+            content_type=content_type,
             provider=self.name,
             cost=cost,
         )
@@ -88,11 +93,14 @@ class ZenRowsProvider(ExternalProvider):
             raise ExternalProviderError("external_provider_unavailable", response.status_code)
         html = response.text
         cost = _extract_cost({}, response.headers)
+        content_type = response.headers.get("content-type")
         return ExternalFetchResult(
             url=str(response.url),
             status=response.status_code,
             html=html,
             headers={str(k): str(v) for k, v in response.headers.items()},
+            content=html.encode("utf-8", errors="ignore"),
+            content_type=str(content_type) if content_type else None,
             provider=self.name,
             cost=cost,
         )

@@ -7,6 +7,7 @@ import tempfile
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
@@ -38,9 +39,19 @@ from core.metrics import record_detector_signal
 from core.security import SecurityError, ensure_url_allowed
 from scraper.detector import detect_blocked_response, detect_empty_parse
 from scraper.engine import EngineOutcome
-from scraper.fetcher import filter_cookies_for_url
+from scraper.fetcher import filter_cookies_for_url, identity_headers, merge_cookies
 from scraper.llm_recovery import recover_with_llm
 from scraper.parsing import parse_html
+from scraper.plugins import (
+    ParseContext,
+    RequestContext,
+    ResponseContext,
+    apply_parse_plugins,
+    apply_request_plugins,
+    apply_response_plugins,
+    load_plugins,
+    resolve_plugin_names,
+)
 from scraper.selector_registry import load_selectors_async, record_candidates_async
 
 logger = logging.getLogger(__name__)
@@ -74,10 +85,15 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         if not job.schema_id:
             return EngineOutcome(success=False, error="schema_missing")
         url = job.url
+        plugin_names = await resolve_plugin_names(session, job.schema_id, job.tenant)
 
     selectors = await load_selectors_async(job.schema_id)
     if not selectors:
         return await _mark_failed(job_id, "no_selectors")
+
+    plugins, plugin_error = load_plugins(plugin_names)
+    if plugin_error:
+        return await _mark_failed(job_id, plugin_error)
 
     redis = get_redis()
     try:
@@ -86,6 +102,36 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         return await _mark_failed(job_id, exc.code)
     assignment = await acquire_identity_for_url_async(url, job.tenant)
     identity = assignment.identity
+
+    headers = identity_headers(
+        identity.fingerprint if identity else None,
+        settings.fetch_user_agent,
+    )
+    identity_cookies = list(identity.cookies) if identity else []
+    request_cookies = filter_cookies_for_url(identity_cookies, url)
+    request_ctx = RequestContext(
+        url=url,
+        headers=headers,
+        cookies=request_cookies,
+        proxy_url=assignment.proxy_url,
+        engine="browser",
+        tenant=job.tenant,
+        schema_id=job.schema_id,
+        job_id=str(job_id),
+    )
+    request_ctx, error = apply_request_plugins(request_ctx, plugins)
+    if error:
+        return await _mark_failed(job_id, error)
+    if request_ctx.url != url:
+        original_domain = extract_domain(url)
+        new_domain = extract_domain(request_ctx.url)
+        if not original_domain or original_domain != new_domain:
+            return await _mark_failed(job_id, "plugin_url_changed")
+        url = request_ctx.url
+        try:
+            await ensure_url_allowed(url)
+        except SecurityError as exc:
+            return await _mark_failed(job_id, exc.code)
 
     logger.info(
         "Browser settings: timeout_ms=%s wait_until=%s wait_for_selector=%s wait_for_ms=%s scroll_steps=%s scroll_delay_ms=%s scroll_container=%s collect_max_items=%s pagination_max_pages=%s pagination_next_selector=%s pagination_param=%s pagination_start=%s pagination_step=%s pagination_template=%s headless=%s full_page=%s",
@@ -161,7 +207,9 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
             url,
             redis,
             identity,
-            assignment.proxy_url,
+            request_ctx.proxy_url,
+            extra_headers=request_ctx.headers,
+            extra_cookies=request_ctx.cookies,
         )
     except GovernanceError as exc:
         error = exc.code
@@ -180,6 +228,39 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         await _update_job(job_id, None, error, store)
         return EngineOutcome(success=False, error=error)
 
+    if plugins:
+        updated_snapshots: list[PageSnapshot] = []
+        for snapshot in snapshots:
+            response_ctx = ResponseContext(
+                url=snapshot.url,
+                status=snapshot.status,
+                headers=snapshot.headers,
+                body=snapshot.html,
+                content=snapshot.html.encode("utf-8", errors="ignore"),
+                content_type=snapshot.headers.get("content-type")
+                or snapshot.headers.get("Content-Type"),
+                cookies=[],
+                truncated=False,
+                engine="browser",
+                tenant=job.tenant,
+                schema_id=job.schema_id,
+                job_id=str(job_id),
+            )
+            response_ctx, error = apply_response_plugins(response_ctx, plugins)
+            if error:
+                return await _mark_failed(job_id, error)
+            updated_snapshots.append(
+                PageSnapshot(
+                    html=response_ctx.body,
+                    url=response_ctx.url or snapshot.url,
+                    status=response_ctx.status if response_ctx.status is not None else snapshot.status,
+                    headers=response_ctx.headers or snapshot.headers,
+                )
+            )
+        snapshots = updated_snapshots
+        if snapshots:
+            html = snapshots[-1].html
+
     blocked_reason = _detect_blocked_snapshots(snapshots)
     if blocked_reason:
         record_detector_signal(blocked_reason, "browser", "pre_parse", url)
@@ -191,6 +272,19 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         data, errors = _collect_from_snapshots(snapshots, selectors)
     else:
         data, errors = parse_html(html or "", selectors, base_url=url)
+    parse_ctx = ParseContext(
+        data=data,
+        errors=errors,
+        engine="browser",
+        tenant=job.tenant,
+        schema_id=job.schema_id,
+        job_id=str(job_id),
+    )
+    parse_ctx, error = apply_parse_plugins(parse_ctx, plugins)
+    if error:
+        return await _mark_failed(job_id, error)
+    data, errors = parse_ctx.data, parse_ctx.errors
+
     empty_reason = detect_empty_parse(_latest_snapshot_status(snapshots), data, selectors, errors)
     if empty_reason:
         record_detector_signal(empty_reason, "browser", "post_parse", url)
@@ -220,6 +314,8 @@ async def _render_pages(
     redis,
     identity: IdentityContext | None,
     proxy_url: str | None,
+    extra_headers: dict[str, str] | None = None,
+    extra_cookies: list[dict[str, Any]] | None = None,
 ) -> tuple[str, bytes, bytes, list[PageSnapshot]]:
     html = ""
     snapshots: list[PageSnapshot] = []
@@ -234,11 +330,21 @@ async def _render_pages(
                     context_kwargs["proxy"] = {"server": proxy_url}
                 fingerprint = identity.fingerprint if identity else {}
                 context_kwargs.update(_context_kwargs_from_fingerprint(fingerprint))
+                if extra_headers:
+                    existing_headers = context_kwargs.get("extra_http_headers") or {}
+                    if not isinstance(existing_headers, dict):
+                        existing_headers = {}
+                    merged_headers = {**existing_headers, **extra_headers}
+                    context_kwargs["extra_http_headers"] = merged_headers
                 if identity and identity.storage_state:
                     context_kwargs["storage_state"] = identity.storage_state
                 context = await browser.new_context(**context_kwargs)
-                if identity and identity.cookies and not identity.storage_state:
-                    cookies = _filter_context_cookies(identity.cookies, url)
+                if not identity or not identity.storage_state:
+                    base_cookies = identity.cookies if identity else []
+                    cookies = _filter_context_cookies(base_cookies, url)
+                    if extra_cookies:
+                        cookies = merge_cookies(cookies, extra_cookies)
+                        cookies = _filter_context_cookies(cookies, url)
                     if cookies:
                         await context.add_cookies(cookies)
                 permissions = fingerprint.get("permissions") if isinstance(fingerprint, dict) else None

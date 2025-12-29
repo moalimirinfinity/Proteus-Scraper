@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     external_breaker_window_sec: int = 60
     external_breaker_cooldown_sec: int = 300
 
+    plugins_dir: str = "plugins"
+    plugins_allowlist: str | None = None
+    plugins_default: str | None = None
+
     rate_limit_capacity: int = 0
     rate_limit_refill_per_sec: float = 0.0
     rate_limit_max_wait_ms: int = 0

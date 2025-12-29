@@ -103,17 +103,20 @@ class SchemaCreate(BaseModel):
     schema_id: str = Field(..., min_length=1)
     name: str | None = None
     description: str | None = None
+    plugins: list[str] | None = None
 
 
 class SchemaUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    plugins: list[str] | None = None
 
 
 class SchemaOut(BaseModel):
     schema_id: str
     name: str | None = None
     description: str | None = None
+    plugins: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -199,6 +202,15 @@ class IdentityOut(BaseModel):
     last_failed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class TenantPluginsUpdate(BaseModel):
+    plugins: list[str] = Field(default_factory=list)
+
+
+class TenantPluginsOut(BaseModel):
+    tenant: str
+    plugins: list[str] = Field(default_factory=list)
 
 
 class PreviewHtmlRequest(BaseModel):
