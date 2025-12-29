@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "name": "Alpha",
+      "url": "http://testserver/product/1",
+      "price": 9.5
+    },
+    {
+      "name": "Bravo",
+      "url": "http://testserver/product/2",
+      "price": 15.25
+    }
+  ]
+}
