@@ -42,6 +42,38 @@ body {
   z-index: 1;
 }
 
+.header-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-end;
+  min-width: 320px;
+}
+
+.auth-panel {
+  background: var(--card);
+  border: 1px solid var(--outline);
+  border-radius: 14px;
+  padding: 12px;
+  box-shadow: 0 10px 24px var(--shadow);
+  width: 100%;
+}
+
+.auth-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+
+.auth-row input {
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: "Space Grotesk", sans-serif;
+}
+
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.2em;
@@ -272,6 +304,14 @@ iframe {
   }
   .result-grid {
     grid-template-columns: 1fr;
+  }
+  .header {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .header-actions {
+    align-items: stretch;
+    width: 100%;
   }
 }
 

@@ -14,7 +14,18 @@
         <h1>Preview. Select. Extract.</h1>
         <p class="subtitle">Build schemas visually and manage selector recovery without SQL.</p>
       </div>
-      <div class="status-pill" id="status-pill">Idle</div>
+      <div class="header-actions">
+        <div class="auth-panel">
+          <label class="tiny" for="auth-token">Auth token</label>
+          <div class="auth-row">
+            <input id="auth-token" type="password" placeholder="Paste token" />
+            <button class="primary" id="auth-save">Connect</button>
+            <button class="ghost" id="auth-clear">Clear</button>
+          </div>
+          <div class="tiny" id="auth-status">Not connected</div>
+        </div>
+        <div class="status-pill" id="status-pill">Idle</div>
+      </div>
     </header>
 
     <main class="layout">
@@ -47,7 +58,12 @@
               </div>
               <div class="tiny" id="selected-selector">No selector selected</div>
             </div>
-            <iframe id="preview-frame" title="preview" sandbox="allow-same-origin"></iframe>
+            <iframe
+              id="preview-frame"
+              title="preview"
+              sandbox="allow-same-origin"
+              referrerpolicy="no-referrer"
+            ></iframe>
             <p class="tiny" id="preview-hint"></p>
           </div>
           <div class="pane">
