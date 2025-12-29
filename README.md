@@ -1,64 +1,107 @@
 # Proteus-Scraper
 
-This repository contains the Proteus-Scraper control and data plane services.
+Proteus-Scraper is a schema-driven extraction platform that combines fast HTTP fetching, browser rendering, and LLM recovery. You submit a URL and a schema; Proteus selects an engine, validates results, and stores both structured data and raw artifacts.
 
-- Architecture: see `docs/ARCHITECTURE.md`
-- Project overview: see `docs/project-overview.md`
-- Development plan: see `docs/DEVELOPMENT_PLAN.md`
+- Architecture: `docs/ARCHITECTURE.md`
+- Project overview: `docs/project-overview.md`
+- Development plan: `docs/DEVELOPMENT_PLAN.md`
+
+## What You Get
+- FastEngine (httpx) for static HTML.
+- BrowserEngine (Playwright) for JS-rendered pages.
+- StealthEngine (curl_cffi, optional) for TLS/JA3-sensitive targets.
+- External API tier (allowlist + budget gated).
+- Schema/selector CRUD + preview endpoints.
+- List extraction with grouped selectors and attribute fields.
+- LLM recovery + selector candidate promotion.
+- Governance (rate limits, circuit breakers, budgets).
+- Adaptive engine router (detector-driven escalation).
+- Security (SSRF protections + auth/tenant scoping).
+- Control Panel UI for preview and selector building.
 
 ## Quickstart
 
-Start local services:
-
+Install dependencies:
 ```bash
-make up
 poetry install
-make init
+poetry run playwright install
 ```
 
-Run the API:
-
+(Optional) enable stealth fetcher:
 ```bash
-poetry run uvicorn api.main:app --reload
+poetry install --extras stealth
 ```
 
-Run the dispatcher and engine worker (separate terminals):
-
+Start infra + API + workers:
 ```bash
-poetry run arq core.tasks.DispatcherWorkerSettings
-poetry run arq core.tasks.EngineWorkerSettings
+make dev
 ```
 
-For BrowserEngine, set `ENGINE_QUEUE=engine:browser` before starting the engine worker.
+If Poetry is not on your PATH:
+```bash
+make POETRY=/path/to/poetry dev
+```
+
+Seed a sample schema:
+```bash
+poetry run python scripts/seed_data.py
+```
 
 Submit a job:
-
 ```bash
-curl -X POST http://localhost:8000/submit \
+curl -X POST http://127.0.0.1:8000/submit \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com","schema_id":"example","priority":"standard"}'
 ```
 
-Submit a browser-rendered job:
-
+Preview extraction immediately:
 ```bash
-curl -X POST http://localhost:8000/submit \
+curl -X POST http://127.0.0.1:8000/schemas/example/preview \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com?render=true","schema_id":"example","priority":"standard","engine":"browser"}'
+  -d '{"url":"https://example.com","engine":"fast"}'
 ```
 
-Check status and results:
-
+Preview raw HTML (fast or browser):
 ```bash
-curl http://localhost:8000/status/<job_id>
-curl http://localhost:8000/results/<job_id>
+curl -X POST http://127.0.0.1:8000/preview/html \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","engine":"browser"}'
 ```
 
-## Selector Registry (MVP)
-
-Selectors are stored in Postgres and loaded at runtime for parsing. Example insert:
-
-```sql
-INSERT INTO selectors (schema_id, field, selector, data_type, required, active)
-VALUES ('example', 'title', 'h1', 'string', true, true);
+Check status/results:
+```bash
+curl http://127.0.0.1:8000/status/<job_id>
+curl http://127.0.0.1:8000/results/<job_id>
 ```
+
+Open the Control Panel UI:
+- `http://127.0.0.1:8000/ui`
+
+## Selector Registry
+Selectors are stored in Postgres and loaded at runtime for parsing. You can manage them via the UI or the API.
+
+Example selector insert via API:
+```bash
+curl -X POST http://127.0.0.1:8000/schemas/example/selectors \
+  -H "Content-Type: application/json" \
+  -d '{"field":"title","selector":"h1","data_type":"string","required":true,"active":true}'
+```
+
+XPath selectors are supported with a prefix:
+- `xpath://div[@id="main"]//h1`
+
+## Engine Selection
+- `engine: "fast"` uses httpx.
+- `engine: "browser"` uses Playwright.
+- `engine: "stealth"` uses curl_cffi (requires extras).
+- `engine: "external"` uses the external provider (allowlist + budget gated).
+
+You can also hint in URLs:
+- `?browser=true` or `?render=true` -> browser
+- `?engine=stealth` or `?stealth=true` -> stealth
+
+## Upgrade Notes
+- Stealth fetching uses curl_cffi and is optional (`--extras stealth`).
+- New fetcher config lives in `.env` (`FETCH_TIMEOUT_MS`, `FETCH_MAX_BYTES`, `FETCH_USER_AGENT`, `FETCH_CURL_IMPERSONATE`).
+- External tier is gated by `EXTERNAL_ENABLED`, `EXTERNAL_API_KEY`, and `EXTERNAL_ALLOWLIST_DOMAINS`.
+- Identity persistence requires `IDENTITY_ENCRYPTION_KEY`.

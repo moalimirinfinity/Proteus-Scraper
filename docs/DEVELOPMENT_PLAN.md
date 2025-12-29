@@ -1,6 +1,11 @@
 # Proteus-Scraper: Development Plan
 
-This plan translates `project-overview.md` and `ARCHITECTURE.md` into an executable roadmap with phases, deliverables, and acceptance criteria. It assumes the existing scaffold in the repository root and focuses on building a production-grade, multi-engine extraction platform.
+This plan translates `project-overview.md` and `ARCHITECTURE.md` into an executable roadmap with phases, deliverables, and acceptance criteria. Status reflects the current codebase.
+
+## Status Legend
+- ✅ Done
+- 🟡 Partial
+- ❌ Planned
 
 ## Guiding Principles
 - Speed by default, AI by necessity.
@@ -9,19 +14,19 @@ This plan translates `project-overview.md` and `ARCHITECTURE.md` into an executa
 - Observability as a first-class feature.
 - Configuration and selectors are database-driven, not hardcoded.
 
-## Phase 0: Foundation and Developer Experience (Partial)
+## Phase 0: Foundation and Developer Experience ✅
 Goal: Make the repository runnable, testable, and consistent.
 
 Deliverables:
-- ✅ Poetry-based dependency management and lockfile.
-- ❌ CI workflow that runs tests on push/PR.
+- ✅ Poetry dependency management and lockfile.
+- ✅ CI workflow that runs tests on push/PR and builds API/worker images.
 - ✅ Makefile commands for common tasks (dev, stop, POETRY override).
 - ✅ Base docs for architecture and overview.
-- ✅ .env.example and config conventions (browser settings documented).
+- ✅ .env.example and config conventions.
 - ✅ SETUP.md quickstart with runnable examples.
 
 Acceptance criteria:
-- ❌ `make test` succeeds in CI (tests directory exists but is empty).
+- ✅ CI runs pytest on push/PR and builds container images.
 - ✅ `make up` boots local services with no manual edits.
 - ✅ `make dev` boots infra, initializes DB, and starts API + workers.
 - ✅ Docs describe how to submit a job and read results.
@@ -31,29 +36,32 @@ Goal: Implement the API, job contract, and durable state machine.
 
 Deliverables:
 - ✅ FastAPI app with `/submit`, `/status/{job_id}`, `/results/{job_id}`.
-- ✅ Pydantic schemas for jobs and results (includes Schema models).
-- ✅ Postgres schema for `jobs`, `job_attempts`, `artifacts`, `selectors`, `selector_candidates`, `schemas`.
-- ✅ Schema + selector CRUD endpoints (`/schemas`, `/schemas/{schema_id}/selectors`).
+- ✅ Pydantic schemas for jobs and results.
+- ✅ Postgres schema for jobs, attempts, artifacts, selectors, candidates, schemas.
+- ✅ Schema + selector CRUD endpoints.
 - ✅ Preview endpoint for immediate extraction (`/schemas/{schema_id}/preview`).
+- ✅ Preview HTML endpoint (`/preview/html`).
 - ✅ Redis queues: priority + engine routing.
 - ✅ ARQ tasks skeleton and dispatcher contract.
 
 Acceptance criteria:
 - ✅ Submitting a job creates a DB record and enqueues in Redis.
-- ✅ Status endpoint reflects state transitions (queued -> running -> succeeded/failed).
+- ✅ Status endpoint reflects state transitions.
 - ✅ Results endpoint returns structured output and artifact links.
-- ✅ Preview endpoint runs extraction and returns data + artifacts.
+- ✅ Preview endpoints return data or HTML + artifacts.
 
 ## Phase 2: Data Plane MVP (FastEngine) ✅
-Goal: Get deterministic scraping working end-to-end for static pages.
+Goal: Deterministic scraping for static pages using the modern async fetcher.
 
 Deliverables:
-- ✅ Scrapy spider that fetches URLs from the queue.
+- ✅ Async fetcher (httpx) with proxy + identity support.
+- ✅ Optional stealth fetcher (curl_cffi) for TLS/JA3-sensitive targets.
+- ✅ Unified fetcher used by fast engine and preview HTML path.
 - ✅ Parser that uses selectors from DB (no hardcoded selectors).
 - ✅ List extraction with grouped selectors (`group_name` + `item_selector`).
 - ✅ Attribute extraction for fields (e.g., `href`).
+- ✅ XPath support via Parsel (`xpath:` selectors).
 - ✅ Artifact capture: HTML stored to S3/MinIO and referenced in DB.
-- ✅ Storage worker to persist validated output.
 
 Acceptance criteria:
 - ✅ Static target successfully extracted with schema validation.
@@ -115,81 +123,130 @@ Acceptance criteria:
 - ✅ Breaker trips and pauses domains after threshold.
 - ✅ LLM calls stop when budget exceeded.
 
+## Phase 5.1: Adaptive Engine Router ✅
+Goal: Escalate across tiers when blocked while preserving auditability.
+
+Deliverables:
+- ✅ Detector for captcha/blocked/403/429/empty selectors (headers/URL/title/script markers).
+- ✅ Escalation re-queues with reason codes and max depth (`ROUTER_MAX_DEPTH`).
+- ✅ Analyzer runs pre-parse and post-parse (empty data with 200 is a signal).
+- ✅ Detector reason recorded in `job_attempts`.
+
+Acceptance criteria:
+- ✅ Auto-escalation works without infinite loops.
+- ✅ Blocked responses move to the next tier with reason codes.
+
+## Phase 5.2: External API Tier ✅
+Goal: Provide a gated Tier 4 fallback for high-value targets.
+
+Deliverables:
+- ✅ Provider interface (Scrapfly/ZenRows) with allowlist + budget gate.
+- ✅ Usage metrics and cost tracking in Prometheus.
+- ✅ Separate queue (`engine:external`) and per-tenant caps to prevent runaway costs.
+- ✅ Circuit breaker for vendor failures and per-domain cooling.
+
+Acceptance criteria:
+- ✅ External calls are measurable and controlled.
+- ✅ Budget/allowlist gates prevent unauthorized usage.
+
 ## Phase 6: Identity and Session Management ✅
 Goal: Treat identity as a managed resource.
 
 Deliverables:
+- ✅ Sticky identity per domain (cookies + proxy/IP binding).
 - ✅ Cookie jar storage (encrypted at rest).
+- ✅ storageState/localStorage support for browser contexts.
+- ✅ Identity health score with decay and failure-based rotation.
 - ✅ Fingerprint pool definitions per tenant.
-- ✅ Identity rotation based on usage and failure.
 - ✅ Identity CRUD API for managing fingerprints + cookies.
+- ✅ Per-domain identity bindings with TTLs to avoid cross-domain leakage.
 
 Acceptance criteria:
 - ✅ Authenticated scraping works without repeated login.
-- ✅ Identity rotation reduces repeated bans on target.
+- ✅ Identity reuse is consistent per domain; rotations occur after failures.
+- ✅ Stored cookies/storage state are reused by the browser engine.
+
+## Phase 6.1: Security and Access Control ✅
+Goal: Protect the API and UI for multi-tenant usage.
+
+Deliverables:
+- ✅ SSRF protections with allow/deny lists and private IP blocking.
+- ✅ API + UI auth (token/JWT) with tenant scoping.
+- ✅ CSRF protection for cookie-authenticated requests.
+- ✅ Preview/artifact endpoints enforce auth + tenant access checks.
+
+Acceptance criteria:
+- ✅ Unauthorized preview/artifact requests return 401.
+- ✅ Tenant mismatch returns 403.
+- ✅ SSRF blocks private IPs by default.
 
 ## Phase 7: Observability and Mission Control ✅
 Goal: Full visibility across extraction and infrastructure.
 
 Deliverables:
-- ✅ Prometheus metrics for jobs, failures, latency, LLM costs.
-- ✅ Grafana dashboards for success rate and ban spikes.
+- ✅ Prometheus metrics for jobs, failures, latency, LLM costs, detector signals, escalations, engine mix, external API usage.
+- ✅ Grafana dashboards for tier mix, success rate, ban spikes, and budget usage.
 - ✅ Log aggregation via Loki.
+- ✅ Stealth/external worker targets included in Prometheus scrapes.
 
 Acceptance criteria:
-- ✅ Dashboards show domain success rate and proxy health.
+- ✅ Dashboards show tier mix and failure causes.
 - ✅ Alerts trigger on ban spikes or budget overruns.
 
-## Phase 7.1: Control Panel (Web UI) ✅
-Goal: Make the system usable without direct DB edits or raw API calls.
+## Phase 7.1: Control Panel Hardening ✅
+Goal: Make the system usable and safe for multi-tenant usage.
 
 Deliverables:
 - ✅ Web dashboard to submit a URL and run preview jobs.
 - ✅ Visual selector builder to generate schema JSON (click + highlight).
 - ✅ "Quarantine" view for broken selectors and LLM candidates.
+- ✅ Auth gate + CSRF protection for UI actions.
+- ✅ Preview sandboxing (CSP + iframe sandbox) and rate limits.
 
 Acceptance criteria:
 - ✅ Non-technical users can create a schema without SQL.
 - ✅ Preview results show data + artifacts in the UI.
+- ✅ UI actions are rate-limited and require auth/CSRF.
+- ✅ Preview sandbox prevents script execution.
 - ✅ Quarantine view allows promoting or rejecting candidates.
 
-## Phase 8: Network Infrastructure
+## Phase 8: Network Infrastructure ✅
 Goal: Decouple proxy logic from code.
 
 Deliverables:
-- Smart egress gateway (Squid/Glider) with provider fallback.
-- Ingress routing via Traefik for API and web endpoints.
-- Configurable proxy policies in the DB.
+- ✅ Smart egress gateway (Squid/Glider) with provider fallback.
+- ✅ Ingress routing via Traefik for API and web endpoints.
+- ✅ Configurable proxy policies in the DB.
 
 Acceptance criteria:
-- Workers route traffic through the gateway by default.
-- Proxy provider switching does not require code changes.
+- ✅ Workers route traffic through the gateway by default.
+- ✅ Proxy provider switching does not require code changes.
 
-## Phase 8.1: Extensibility and Plugin Interface
+## Phase 8.1: Extensibility and Plugin Interface (❌)
 Goal: Allow new capabilities without modifying core code.
 
 Deliverables:
 - ❌ Plugin/middleware interface for request/response hooks.
 - ❌ Plugin discovery and safe loading from `plugins/`.
-- ❌ Reference plugins (e.g., PDF parser, custom headers).
+- ❌ Reference plugins (PDF parser, custom headers, payload transforms).
 
 Acceptance criteria:
 - ❌ Custom logic can be added via a plugin without touching core modules.
 - ❌ Plugins can be enabled per schema or tenant.
 
-## Phase 9: Human-Like Interaction and Vision
+## Phase 9: Human-Like Interaction and Vision (❌)
 Goal: Reduce bot detection and external API cost.
 
 Deliverables:
-- Ghost Cursor integration for human-like mouse movement.
-- Local OCR pipeline (Tesseract/PaddleOCR).
-- Lightweight object detection (YOLO) for simple challenges.
+- ❌ Ghost Cursor integration for human-like mouse movement.
+- ❌ Local OCR pipeline (Tesseract/PaddleOCR).
+- ❌ Lightweight object detection (YOLO) for simple challenges.
 
 Acceptance criteria:
-- Protected UI flows succeed more often with human-like interaction.
-- OCR handles image-encoded data without external APIs.
+- ❌ Protected UI flows succeed more often with human-like interaction.
+- ❌ OCR handles image-encoded data without external APIs.
 
-## Phase 9.1: Solver Pipeline (CAPTCHA and Challenges)
+## Phase 9.1: Solver Pipeline (CAPTCHA and Challenges) (❌)
 Goal: Provide a standard solver interface for hard challenges (reCAPTCHA/Turnstile).
 
 Deliverables:
@@ -203,58 +260,64 @@ Acceptance criteria:
 - ❌ Successful solves resume the job without a restart.
 - ❌ Failures are recorded with explicit reason codes.
 
-## Phase 10: Data Lake and Time-Travel Storage
+## Phase 10: Data Lake and Time-Travel Storage (❌)
 Goal: Turn scraping into longitudinal intelligence.
 
 Deliverables:
-- Diffing engine for state changes.
-- Versioned raw artifact storage in S3.
-- History tables (e.g., `price_history`).
+- ❌ Diffing engine for state changes.
+- ❌ Versioned raw artifact storage in S3.
+- ❌ History tables (e.g., `price_history`).
 
 Acceptance criteria:
-- No duplicate records for unchanged results.
-- Versioned snapshots accessible by job/time.
+- ❌ No duplicate records for unchanged results.
+- ❌ Versioned snapshots accessible by job/time.
 
-## Phase 11: Testing and Simulation
+## Phase 11: Testing and Simulation (🟡)
 Goal: Validate safely without getting banned.
 
 Deliverables:
-- HAR replay mode and dry-run pipeline.
-- Mock target service for integration tests.
-- Golden fixtures for regression detection.
+- ❌ HAR replay mode and dry-run pipeline.
+- ✅ Mock target service for integration tests.
+- ✅ Golden fixtures for regression detection.
+- ✅ Integration tests for parsing, escalation, and LLM recovery.
 
 Acceptance criteria:
-- Integration tests run without hitting external targets.
-- Regression tests catch selector drift or parsing errors.
+- ✅ Integration tests run without hitting external targets.
+- 🟡 Regression tests catch selector drift or parsing errors (fixtures + integration tests in place).
 
-## Phase 12: Release Readiness (Partial)
+## Phase 12: Release Readiness (🟡)
 Goal: Make the project consumable by the public.
 
 Deliverables:
 - ❌ Contributor guide, security policy, and changelog.
-- ✅ Example schemas, jobs, and sample outputs (seed_data includes list example).
-- ✅ Docker Compose for single-node demo (docker-compose.yml exists).
+- ✅ CI workflow for tests and container builds.
+- ✅ Example schemas, jobs, and sample outputs.
+- ✅ Docker Compose for single-node demo.
 - ❌ Kubernetes manifests or Helm chart for production.
 - ✅ README with quickstart and examples.
 - ✅ SETUP.md with step-by-step local run instructions.
 
 Acceptance criteria:
-- ✅ New contributor can run the stack from scratch (README provides instructions).
-- ✅ First-time users can submit a job and get results (README has curl examples).
+- ✅ New contributor can run the stack from scratch.
+- ✅ First-time users can submit a job and get results.
 
 ## Cross-Cutting Workstreams
-- **Schema Registry**: ✅ Schema registry (Schema model exists), ✅ selector sets (grouped + attribute selectors), ✅ CRUD + preview endpoint, ❌ migration path (Alembic configured but no migrations), ✅ validation rules (Pydantic schemas).
-- **Config Service**: ❌ Domain policies, ✅ selector sets (database-driven), ❌ routing rules (basic engine selection only).
-- **Multi-Tenancy**: ✅ Per-tenant LLM budgets, ❌ per-tenant rate limits, ✅ identity pools per tenant, ❌ tenant isolation (row-level or schema split).
-- **Security**: ❌ SSRF protection, ❌ allow/deny lists, ❌ audit logging (basic logging only).
-- **Control Panel**: ✅ Preview UI, ✅ selector builder, ✅ selector quarantine workflow.
-- **Extensibility**: ❌ Plugin interface, ❌ plugin sandboxing, ❌ plugin registry.
-- **Solver Pipeline**: ❌ Challenge detection, ❌ solver adapters, ❌ resume flow.
+- **Schema Registry**: ✅ selectors, ✅ CRUD + preview, 🟡 schema versioning/migration path, ✅ validation rules.
+- **Fetcher Stack**: ✅ httpx fetcher, ✅ optional curl_cffi stealth, ✅ shared preview path.
+- **Routing & Policy**: ✅ adaptive routing + escalation policies, ✅ external tier gating.
+- **Multi-Tenancy**: ✅ per-tenant LLM budgets, ✅ per-tenant external caps, ❌ per-tenant rate limits, ✅ identity pools, 🟡 tenant isolation (auth scoping only).
+- **Security**: ✅ SSRF protection, ✅ allow/deny lists, ✅ auth + tenant scoping, ❌ audit logging.
+- **Control Panel**: ✅ preview UI, ✅ selector builder, ✅ candidate quarantine, ✅ auth/CSRF, ✅ rate limits, ✅ preview sandboxing.
+- **Observability**: ✅ engine mix + detector signals, ✅ external API metrics.
+- **Extensibility**: ❌ plugin interface, ❌ sandboxing, ❌ registry.
+- **Solver Pipeline**: ❌ challenge detection, ❌ solver adapters, ❌ resume flow.
 
 ## Dependencies and Order
 - Phases 1-2 are prerequisites for any engine or AI work.
 - Phase 4 depends on Phase 2 parsing and schema validation.
 - Phases 5-6 (governance + identity) must be in place before scaling.
+- Phases 5.1-5.2 (adaptive router + external tier) depend on Phase 2 and governance.
+- Phase 6.1 (security) should precede UI hardening and external exposure.
 - Phase 7 (observability) should be incremental from Phase 1 onward.
 
 ## Success Metrics
@@ -274,13 +337,18 @@ Acceptance criteria:
 - ✅ FastAPI submit/status/results.
 - ✅ Postgres job state machine.
 - ✅ Redis queues and dispatcher skeleton.
-- ✅ FastEngine scraping + selector registry.
-- ✅ Schema/selector CRUD + preview endpoint.
-- ✅ List extraction + attribute selectors.
+- ✅ FastEngine fetcher + selector registry.
+- ✅ Schema/selector CRUD + preview endpoints.
+- ✅ List extraction + attribute selectors + XPath support.
 - ✅ BrowserEngine with Playwright.
 - ✅ List pagination/scroll aggregation.
 - ✅ LLM recovery with selector candidate promotion.
 - ✅ Artifact storage to MinIO/S3.
 - ✅ Governance (rate limits + circuit breaker + LLM budgets).
+- ✅ Adaptive engine router (detector + escalation).
+- ✅ External API tier (allowlist + budget gated).
 - ✅ Identity management (encrypted cookies + fingerprints).
+- ✅ Security (SSRF + auth/tenant scoping).
 - ✅ Observability stack (Prometheus/Grafana/Loki) with baseline alerts.
+- ✅ Control Panel (preview, selector builder, quarantine).
+- ✅ Control Panel hardening (auth/CSRF + rate limits).
