@@ -109,12 +109,12 @@ sequenceDiagram
 ## Engine Behavior
 - FastEngine: uses httpx with optional proxy and identity headers/cookies.
 - StealthEngine: uses curl_cffi when stronger TLS/JA3 mimicry is required.
-- BrowserEngine: uses Playwright contexts, applies identity and captures HAR/screenshot.
+- BrowserEngine: uses Playwright contexts, applies identity, humanizes cursor movement, and captures HAR/screenshot.
 - Both engines pass HTML into the same parser and LLM recovery path.
 
 ## Target Routing and Escalation (Standard)
 - Tier order: fast (httpx) -> stealth (curl_cffi) -> browser (Playwright) -> external API.
-- Detector signals: captcha markers, 403/429, challenge scripts, blocked HTML, empty selectors.
+- Detector signals: captcha markers, 403/429, challenge scripts, blocked HTML, empty selectors, OCR/vision signals.
 - Escalation re-queues the job with a higher engine and records a reason code.
 - External API calls are allowlist- and budget-gated.
 - Identities are sticky per domain until failure, then rotated.

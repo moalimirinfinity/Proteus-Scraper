@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     browser_pagination_template: str | None = None
     browser_headless: bool = True
     browser_full_page: bool = True
+    browser_humanize: bool = False
+    browser_humanize_moves: int = 3
+    browser_humanize_min_delay_ms: int = 25
+    browser_humanize_max_delay_ms: int = 120
+    browser_humanize_pause_ms: int = 150
 
     fetch_timeout_ms: int = 20000
     fetch_max_bytes: int = 0
@@ -93,6 +98,14 @@ class Settings(BaseSettings):
     plugins_dir: str = "plugins"
     plugins_allowlist: str | None = None
     plugins_default: str | None = None
+
+    vision_ocr_enabled: bool = False
+    vision_ocr_provider: str = "tesseract"
+    vision_ocr_language: str = "eng"
+    vision_yolo_enabled: bool = False
+    vision_yolo_model: str = "yolov8n.pt"
+    vision_yolo_classes: str | None = None
+    vision_yolo_confidence: float = 0.25
 
     rate_limit_capacity: int = 0
     rate_limit_refill_per_sec: float = 0.0

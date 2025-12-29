@@ -19,6 +19,7 @@ Proteus-Scraper is a schema-driven extraction platform that combines fast HTTP f
 - Security (SSRF protections + auth/tenant scoping).
 - Control Panel UI for preview and selector building.
 - Plugin hooks for request/response/parse pipelines.
+- Human-like browser cursor and local OCR/vision signals.
 
 ## Quickstart
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 import os
+import random
 import tempfile
 import sys
 from dataclasses import dataclass
@@ -53,6 +55,7 @@ from scraper.plugins import (
     resolve_plugin_names,
 )
 from scraper.selector_registry import load_selectors_async, record_candidates_async
+from scraper.vision import analyze_screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +137,7 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
             return await _mark_failed(job_id, exc.code)
 
     logger.info(
-        "Browser settings: timeout_ms=%s wait_until=%s wait_for_selector=%s wait_for_ms=%s scroll_steps=%s scroll_delay_ms=%s scroll_container=%s collect_max_items=%s pagination_max_pages=%s pagination_next_selector=%s pagination_param=%s pagination_start=%s pagination_step=%s pagination_template=%s headless=%s full_page=%s",
+        "Browser settings: timeout_ms=%s wait_until=%s wait_for_selector=%s wait_for_ms=%s scroll_steps=%s scroll_delay_ms=%s scroll_container=%s collect_max_items=%s pagination_max_pages=%s pagination_next_selector=%s pagination_param=%s pagination_start=%s pagination_step=%s pagination_template=%s headless=%s full_page=%s humanize=%s humanize_moves=%s",
         settings.browser_timeout_ms,
         settings.browser_wait_until,
         settings.browser_wait_for_selector,
@@ -151,6 +154,8 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         settings.browser_pagination_template,
         settings.browser_headless,
         settings.browser_full_page,
+        settings.browser_humanize,
+        settings.browser_humanize_moves,
     )
     print(
         "BROWSER_SETTINGS",
@@ -170,6 +175,8 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         settings.browser_pagination_template,
         settings.browser_headless,
         settings.browser_full_page,
+        settings.browser_humanize,
+        settings.browser_humanize_moves,
         file=sys.stderr,
         flush=True,
     )
@@ -191,6 +198,8 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         os.environ.get("BROWSER_PAGINATION_TEMPLATE"),
         os.environ.get("BROWSER_HEADLESS"),
         os.environ.get("BROWSER_FULL_PAGE"),
+        os.environ.get("BROWSER_HUMANIZE"),
+        os.environ.get("BROWSER_HUMANIZE_MOVES"),
         file=sys.stderr,
         flush=True,
     )
@@ -261,6 +270,17 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         if snapshots:
             html = snapshots[-1].html
 
+    ocr_text = None
+    if (settings.vision_ocr_enabled or settings.vision_yolo_enabled) and screenshot_bytes:
+        vision = analyze_screenshot(screenshot_bytes)
+        ocr_text = vision.ocr_text
+        vision_reason = vision.ocr_reason or vision.yolo_reason
+        if vision_reason:
+            record_detector_signal(vision_reason, "browser", "pre_parse", url)
+            if identity:
+                await record_identity_failure_async(identity.id, vision_reason, url=url)
+            return EngineOutcome(success=False, error=vision_reason, escalate=True)
+
     blocked_reason = _detect_blocked_snapshots(snapshots)
     if blocked_reason:
         record_detector_signal(blocked_reason, "browser", "pre_parse", url)
@@ -293,19 +313,46 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         budget_allowed = await allow_llm_call_async(redis, str(job.id), job.tenant)
         if not budget_allowed:
             error = "llm_budget_exceeded"
-            await _update_job(job_id, None, error, store, html, screenshot_bytes, har_bytes)
+            await _update_job(
+                job_id,
+                None,
+                error,
+                store,
+                html,
+                screenshot_bytes,
+                har_bytes,
+                ocr_text=ocr_text,
+            )
             return EngineOutcome(success=False, error=error)
         llm_result = await asyncio.to_thread(recover_with_llm, html or "", selectors, job.tenant)
         if llm_result.success and llm_result.data is not None:
             await record_candidates_async(job.schema_id, selectors, llm_result.selectors or {})
-            await _update_job(job_id, llm_result.data, None, store, html, screenshot_bytes, har_bytes)
+            await _update_job(
+                job_id,
+                llm_result.data,
+                None,
+                store,
+                html,
+                screenshot_bytes,
+                har_bytes,
+                ocr_text=ocr_text,
+            )
             return EngineOutcome(success=True, error=None)
 
         error = llm_result.error or "llm_failed"
-        await _update_job(job_id, None, error, store, html, screenshot_bytes, har_bytes)
+        await _update_job(
+            job_id,
+            None,
+            error,
+            store,
+            html,
+            screenshot_bytes,
+            har_bytes,
+            ocr_text=ocr_text,
+        )
         return EngineOutcome(success=False, error=error)
 
-    await _update_job(job_id, data, None, store, html, screenshot_bytes, har_bytes)
+    await _update_job(job_id, data, None, store, html, screenshot_bytes, har_bytes, ocr_text=ocr_text)
     return EngineOutcome(success=True, error=None)
 
 
@@ -419,6 +466,7 @@ async def _render_single_page(page, url: str, redis) -> list[PageSnapshot]:
         )
     if status not in {403, 429} and settings.browser_wait_for_ms > 0:
         await page.wait_for_timeout(settings.browser_wait_for_ms)
+    await _humanize_page(page)
     return await _collect_scroll_snapshots(page, status, headers)
 
 
@@ -436,6 +484,31 @@ async def _collect_scroll_snapshots(
             await page.wait_for_timeout(settings.browser_scroll_delay_ms)
         snapshots.append(PageSnapshot(await page.content(), page.url, status, headers))
     return snapshots
+
+
+async def _humanize_page(page) -> None:
+    if not settings.browser_humanize:
+        return
+    moves = settings.browser_humanize_moves
+    if moves <= 0:
+        return
+    viewport = page.viewport_size
+    if not viewport:
+        try:
+            viewport = await page.evaluate("() => ({width: window.innerWidth, height: window.innerHeight})")
+        except Exception:
+            viewport = {"width": 1280, "height": 720}
+    width = int(viewport.get("width") or 1280)
+    height = int(viewport.get("height") or 720)
+    start = _random_point(width, height)
+    await page.mouse.move(start[0], start[1])
+    for _ in range(moves):
+        end = _random_point(width, height)
+        await _ghost_move(page, start, end)
+        start = end
+        pause = max(settings.browser_humanize_pause_ms, 0)
+        if pause:
+            await page.wait_for_timeout(pause)
 
 
 async def _scroll_once(page) -> None:
@@ -473,6 +546,66 @@ async def _scroll_once(page) -> None:
         """,
         settings.browser_scroll_container_selector,
     )
+
+
+def _random_point(width: int, height: int, margin: int = 12) -> tuple[float, float]:
+    width = max(width, margin * 2 + 1)
+    height = max(height, margin * 2 + 1)
+    x = random.uniform(margin, width - margin)
+    y = random.uniform(margin, height - margin)
+    return x, y
+
+
+async def _ghost_move(page, start: tuple[float, float], end: tuple[float, float]) -> None:
+    distance = math.hypot(end[0] - start[0], end[1] - start[1])
+    steps = max(12, int(distance / 25))
+    cp1 = _random_control_point(start, end, 0.25)
+    cp2 = _random_control_point(start, end, 0.75)
+    for step in range(steps + 1):
+        t = step / steps
+        x, y = _bezier_point(start, cp1, cp2, end, t)
+        jitter = random.uniform(-1.0, 1.0)
+        await page.mouse.move(x + jitter, y + jitter)
+        delay_ms = _random_delay_ms()
+        if delay_ms:
+            await page.wait_for_timeout(delay_ms)
+
+
+def _random_control_point(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    weight: float,
+) -> tuple[float, float]:
+    x = start[0] + (end[0] - start[0]) * weight
+    y = start[1] + (end[1] - start[1]) * weight
+    offset_x = random.uniform(-80, 80)
+    offset_y = random.uniform(-80, 80)
+    return x + offset_x, y + offset_y
+
+
+def _bezier_point(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    t: float,
+) -> tuple[float, float]:
+    u = 1 - t
+    tt = t * t
+    uu = u * u
+    uuu = uu * u
+    ttt = tt * t
+    x = uuu * p0[0] + 3 * uu * t * p1[0] + 3 * u * tt * p2[0] + ttt * p3[0]
+    y = uuu * p0[1] + 3 * uu * t * p1[1] + 3 * u * tt * p2[1] + ttt * p3[1]
+    return x, y
+
+
+def _random_delay_ms() -> int:
+    low = max(settings.browser_humanize_min_delay_ms, 0)
+    high = max(settings.browser_humanize_max_delay_ms, low)
+    if high == 0:
+        return 0
+    return int(random.uniform(low, high))
 
 
 def _build_page_urls(base_url: str) -> list[str] | None:
@@ -699,6 +832,7 @@ async def _update_job(
     html: str | None = None,
     screenshot_bytes: bytes | None = None,
     har_bytes: bytes | None = None,
+    ocr_text: str | None = None,
 ) -> None:
     async with async_session() as session:
         result = await session.execute(select(Job).where(Job.id == job_id))
@@ -760,6 +894,22 @@ async def _update_job(
                 Artifact(
                     job_id=job.id,
                     type="har",
+                    location=stored.location,
+                    checksum=stored.checksum,
+                ),
+            )
+        if ocr_text:
+            stored = store.store_text(
+                str(job_id),
+                "ocr.txt",
+                ocr_text,
+                content_type="text/plain",
+            )
+            await replace_artifact(
+                "ocr",
+                Artifact(
+                    job_id=job.id,
+                    type="ocr",
                     location=stored.location,
                     checksum=stored.checksum,
                 ),

@@ -419,6 +419,7 @@ async def get_artifact(
         "html": "text/html",
         "screenshot": "image/png",
         "har": "application/json",
+        "ocr": "text/plain",
     }.get(artifact.type, "application/octet-stream")
     store = ArtifactStore()
     try:
