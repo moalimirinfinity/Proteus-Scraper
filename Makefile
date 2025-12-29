@@ -21,6 +21,8 @@ dev: up init
 	nohup env METRICS_PORT=8002 $(POETRY) run arq core.tasks.DispatcherWorkerSettings > /tmp/proteus-dispatcher.log 2>&1 &
 	nohup env METRICS_PORT=8003 ENGINE_QUEUE=engine:fast $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-fast.log 2>&1 &
 	nohup env METRICS_PORT=8004 ENGINE_QUEUE=engine:browser $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-browser.log 2>&1 &
+	nohup env METRICS_PORT=8005 ENGINE_QUEUE=engine:stealth $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-stealth.log 2>&1 &
+	nohup env METRICS_PORT=8006 ENGINE_QUEUE=engine:external $(POETRY) run arq core.tasks.EngineWorkerSettings > /tmp/proteus-external.log 2>&1 &
 
 stop:
 	pkill -f "uvicorn api.main" || true

@@ -1,4 +1,24 @@
 services:
+  gateway:
+    image: ghcr.io/nadoo/glider:0.16.3
+    command: -config /etc/glider/glider.conf
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./gateway/glider.conf:/etc/glider/glider.conf:ro
+
+  traefik:
+    image: traefik:v3.0
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   db:
     image: postgres:15
     restart: unless-stopped

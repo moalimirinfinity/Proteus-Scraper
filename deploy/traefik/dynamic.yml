@@ -1,0 +1,13 @@
+http:
+  routers:
+    proteus:
+      rule: PathPrefix(`/`)
+      entryPoints:
+        - web
+      service: proteus-api
+
+  services:
+    proteus-api:
+      loadBalancer:
+        servers:
+          - url: http://host.docker.internal:8000

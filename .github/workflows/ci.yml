@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pip install --no-cache-dir poetry==1.8.3
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run tests
+        run: poetry run pytest -q
+
+      - name: Build API image
+        run: docker build -f deploy/Dockerfile.api -t proteus-api .
+
+      - name: Build worker image
+        run: docker build -f deploy/Dockerfile.worker --build-arg INSTALL_PLAYWRIGHT=0 -t proteus-worker .

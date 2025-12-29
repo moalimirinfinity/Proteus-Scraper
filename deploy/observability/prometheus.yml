@@ -28,3 +28,15 @@ scrape_configs:
     static_configs:
       - targets:
           - host.docker.internal:8004
+
+  - job_name: proteus-worker-stealth
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:8005
+
+  - job_name: proteus-worker-external
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:8006
