@@ -156,7 +156,8 @@ Core tables (simplified):
 - `jobs`: id, url, state, priority, schema_id, tenant.
 - `job_attempts`: job_id, engine, status, error, timings.
 - `artifacts`: job_id, type, location, checksum.
-- `schemas`: schema definition metadata.
+- `schemas`: schema definition metadata + optional plugin list.
+- `tenant_plugins`: per-tenant plugin configuration.
 - `selectors`: schema_id, field, selector, item_selector, attribute, active.
 - `selector_candidates`: inferred selectors with success_count.
 - `identities`: tenant, fingerprint, cookies, active.
@@ -195,6 +196,6 @@ Grafana dashboards focus on success rate, ban spikes, proxy health, and cost.
 - Optional robots.txt enforcement per tenant.
 
 ## Extensibility
-- Planned plugin interface for request/response hooks.
-- Solver pipeline for CAPTCHA and challenge flows.
-- Domain-specific parsers (PDF, JSON, feeds).
+- Plugin interface for request/response/parse hooks loaded from `plugins/`.
+- Plugins can be enabled per schema or tenant (DB-backed configuration).
+- Reference plugins ship for PDF parsing, custom headers, and payload transforms.

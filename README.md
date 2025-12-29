@@ -18,6 +18,7 @@ Proteus-Scraper is a schema-driven extraction platform that combines fast HTTP f
 - Adaptive engine router (detector-driven escalation).
 - Security (SSRF protections + auth/tenant scoping).
 - Control Panel UI for preview and selector building.
+- Plugin hooks for request/response/parse pipelines.
 
 ## Quickstart
 
@@ -99,6 +100,12 @@ XPath selectors are supported with a prefix:
 You can also hint in URLs:
 - `?browser=true` or `?render=true` -> browser
 - `?engine=stealth` or `?stealth=true` -> stealth
+
+## Plugins
+Plugins live in `plugins/` and can be enabled per schema or tenant.
+- Set `PLUGINS_ALLOWLIST` to restrict which plugins can load.
+- Use `PLUGINS_DEFAULT` to enable plugins for all jobs.
+- Update schema `plugins` or `PUT /tenants/{tenant}/plugins`.
 
 ## Upgrade Notes
 - Stealth fetching uses curl_cffi and is optional (`--extras stealth`).

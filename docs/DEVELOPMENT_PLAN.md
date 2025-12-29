@@ -222,17 +222,17 @@ Acceptance criteria:
 - ✅ Workers route traffic through the gateway by default.
 - ✅ Proxy provider switching does not require code changes.
 
-## Phase 8.1: Extensibility and Plugin Interface (❌)
+## Phase 8.1: Extensibility and Plugin Interface (✅)
 Goal: Allow new capabilities without modifying core code.
 
 Deliverables:
-- ❌ Plugin/middleware interface for request/response hooks.
-- ❌ Plugin discovery and safe loading from `plugins/`.
-- ❌ Reference plugins (PDF parser, custom headers, payload transforms).
+- ✅ Plugin/middleware interface for request/response hooks.
+- ✅ Plugin discovery and safe loading from `plugins/`.
+- ✅ Reference plugins (PDF parser, custom headers, payload transforms).
 
 Acceptance criteria:
-- ❌ Custom logic can be added via a plugin without touching core modules.
-- ❌ Plugins can be enabled per schema or tenant.
+- ✅ Custom logic can be added via a plugin without touching core modules.
+- ✅ Plugins can be enabled per schema or tenant.
 
 ## Phase 9: Human-Like Interaction and Vision (❌)
 Goal: Reduce bot detection and external API cost.
@@ -309,7 +309,7 @@ Acceptance criteria:
 - **Security**: ✅ SSRF protection, ✅ allow/deny lists, ✅ auth + tenant scoping, ❌ audit logging.
 - **Control Panel**: ✅ preview UI, ✅ selector builder, ✅ candidate quarantine, ✅ auth/CSRF, ✅ rate limits, ✅ preview sandboxing.
 - **Observability**: ✅ engine mix + detector signals, ✅ external API metrics.
-- **Extensibility**: ❌ plugin interface, ❌ sandboxing, ❌ registry.
+- **Extensibility**: ✅ plugin interface, ❌ sandboxing, ❌ registry.
 - **Solver Pipeline**: ❌ challenge detection, ❌ solver adapters, ❌ resume flow.
 
 ## Dependencies and Order

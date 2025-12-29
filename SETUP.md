@@ -74,6 +74,28 @@ Enable Tier 4 fallback for high-value targets:
 - `EXTERNAL_ALLOWLIST_DOMAINS=example.com,example.org`
 - Optional caps: `EXTERNAL_MAX_CALLS_PER_TENANT`, `EXTERNAL_MAX_COST_PER_TENANT`
 
+## Plugins (Optional)
+Plugins live in `plugins/` and can be enabled per schema or tenant.
+
+Environment variables:
+- `PLUGINS_DIR=plugins`
+- `PLUGINS_ALLOWLIST=custom_headers,payload_transform,pdf_parser`
+- `PLUGINS_DEFAULT=custom_headers`
+
+Tenant-level enablement:
+```bash
+curl -X PUT http://127.0.0.1:8000/tenants/acme/plugins \
+  -H "Content-Type: application/json" \
+  -d '{"plugins":["custom_headers","payload_transform"]}'
+```
+
+Schema-level enablement:
+```bash
+curl -X PATCH http://127.0.0.1:8000/schemas/example \
+  -H "Content-Type: application/json" \
+  -d '{"plugins":["payload_transform"]}'
+```
+
 ## Identity Storage (Cookies + storageState)
 To persist identity cookies/storage state, set:
 - `IDENTITY_ENCRYPTION_KEY` (required for encryption at rest)

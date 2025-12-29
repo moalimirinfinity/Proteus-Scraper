@@ -66,8 +66,8 @@ Core philosophy: speed by default, AI only when needed.
 - Single-node demo: API + workers + services.
 - Scale-out: separate worker pools per engine.
 
-## Extension Points (Planned)
-- Plugin interface for request/response hooks.
+## Extension Points
+- Plugin interface for request/response/parse hooks loaded from `plugins/`.
 - Solver pipeline for CAPTCHA and challenge flows.
 - Domain-specific parsers (PDF, JSON, feeds).
 
@@ -79,6 +79,7 @@ proteus-scraper/
 │   ├── Dockerfile.worker    # Worker image (fetcher + Playwright)
 │   └── docker-compose.yml   # Local orchestration
 ├── docs/                    # Architecture + roadmap docs
+├── plugins/                 # Request/response/parse plugins
 ├── migrations/              # Alembic migrations
 ├── scripts/                 # Helper scripts
 ├── src/
