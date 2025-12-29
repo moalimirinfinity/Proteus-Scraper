@@ -11,7 +11,11 @@ from sqlalchemy import select
 
 from core.config import settings
 from core.db import async_session
+from core.engine_policy import is_stealth_allowed
+from core.external_api import is_external_allowed
 from core.metrics import (
+    record_engine_attempt,
+    record_escalation,
     record_failure,
     record_job_duration,
     record_job_state,
@@ -21,10 +25,15 @@ from core.metrics import (
 from core.models import Job, JobAttempt
 from core.queues import ENGINE_TYPES, PRIORITY_ORDER, engine_queue, priority_key
 from scraper.browser_engine import run_browser_engine
+from scraper.external_engine import run_external_engine
 from scraper.runner import run_fast_engine
 
 
 def select_engine(url: str) -> str:
+    if "engine=stealth" in url or "stealth=true" in url or "stealth=1" in url:
+        return _normalize_engine("stealth", url)
+    if "engine=external" in url or "external=true" in url or "external=1" in url:
+        return "external"
     if "render=true" in url or "browser=true" in url:
         return "browser"
     return ENGINE_TYPES[0]
@@ -51,7 +60,7 @@ async def dispatch_once(ctx: dict) -> None:
         job = result.scalar_one_or_none()
         if job is None:
             return
-        job.engine = job.engine or select_engine(job.url)
+        job.engine = _normalize_engine(job.engine or select_engine(job.url), job.url)
         job.state = "queued"
         await session.commit()
 
@@ -66,8 +75,11 @@ async def process_job(ctx: dict, job_id: str) -> None:
         if job is None:
             return
 
-        engine = job.engine or ENGINE_TYPES[0]
+        engine = _normalize_engine(job.engine or ENGINE_TYPES[0], job.url)
+        if engine != job.engine:
+            job.engine = engine
         record_job_state("running", engine, job.url)
+        record_engine_attempt(engine, job.url)
         now = datetime.now(timezone.utc)
         attempt = JobAttempt(
             job_id=job.id,
@@ -82,6 +94,8 @@ async def process_job(ctx: dict, job_id: str) -> None:
         started_at = time.monotonic()
         if job.engine == "browser":
             outcome = await run_browser_engine(job.id)
+        elif job.engine == "external":
+            outcome = await run_external_engine(job.id)
         else:
             outcome = await run_fast_engine(job.id)
         duration = time.monotonic() - started_at
@@ -89,13 +103,45 @@ async def process_job(ctx: dict, job_id: str) -> None:
         if outcome.success:
             attempt.status = "succeeded"
             record_job_state("succeeded", engine, job.url)
-        else:
+            record_job_duration(engine, job.url, duration)
+            await session.commit()
+            return
+
+        if outcome.escalate:
+            reason = outcome.error or "escalation"
+            attempt.error = reason
+            next_engine = _next_engine(engine, job.url)
+            if next_engine:
+                attempt.status = "escalated"
+                job.state = "queued"
+                job.engine = next_engine
+                job.error = None
+                record_escalation(engine, next_engine, reason, job.url)
+                record_job_state("escalated", engine, job.url)
+                record_job_state("queued", next_engine, job.url)
+                record_job_duration(engine, job.url, duration)
+                await session.commit()
+                await ctx["redis"].enqueue_job(
+                    "process_job",
+                    job_id,
+                    _queue_name=engine_queue(next_engine),
+                )
+                return
             attempt.status = "failed"
-            attempt.error = outcome.error
             job.state = "failed"
-            job.error = outcome.error
+            job.error = reason
             record_job_state("failed", engine, job.url)
-            record_failure(outcome.error, job.url)
+            record_failure(reason, job.url)
+            record_job_duration(engine, job.url, duration)
+            await session.commit()
+            return
+
+        attempt.status = "failed"
+        attempt.error = outcome.error
+        job.state = "failed"
+        job.error = outcome.error
+        record_job_state("failed", engine, job.url)
+        record_failure(outcome.error, job.url)
         record_job_duration(engine, job.url, duration)
         await session.commit()
 
@@ -142,6 +188,48 @@ def _metrics_port(default: int) -> int:
         return int(override)
     except ValueError:
         return default
+
+
+def _next_engine(current: str, url: str) -> str | None:
+    try:
+        index = ENGINE_TYPES.index(current)
+    except ValueError:
+        return None
+    max_depth = _max_escalation_depth()
+    if max_depth <= 0 or index >= max_depth:
+        return None
+    next_index = index + 1
+    while next_index < len(ENGINE_TYPES) and next_index <= max_depth:
+        candidate = ENGINE_TYPES[next_index]
+        if _engine_allowed(candidate, url):
+            return candidate
+        next_index += 1
+    return None
+
+
+def _max_escalation_depth() -> int:
+    limit = settings.router_max_depth
+    if limit <= 0:
+        return 0
+    return min(limit, len(ENGINE_TYPES) - 1)
+
+
+def _normalize_engine(engine: str, url: str) -> str:
+    if engine == "external":
+        return engine
+    if _engine_allowed(engine, url):
+        return engine
+    if engine == "stealth":
+        return "fast"
+    return ENGINE_TYPES[0]
+
+
+def _engine_allowed(engine: str, url: str) -> bool:
+    if engine == "stealth":
+        return is_stealth_allowed(url)
+    if engine == "external":
+        return bool(settings.external_api_key) and is_external_allowed(url)
+    return True
 
 
 class DispatcherWorkerSettings:

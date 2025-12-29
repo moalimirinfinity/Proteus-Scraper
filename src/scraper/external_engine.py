@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -8,38 +9,32 @@ from sqlalchemy import select
 
 from core.artifacts import ArtifactStore
 from core.config import settings
-from core.engine_policy import is_stealth_allowed
-from core.db import async_session
-from core.governance import (
-    allow_llm_call_async,
-    extract_domain,
-    guard_request_async,
-    record_failure_async,
+from core.external_api import (
+    allow_external_call_async,
+    is_external_allowed,
+    is_external_circuit_open_async,
+    record_external_failure_async,
 )
-from core.identities import (
-    acquire_identity_for_url_async,
-    record_identity_failure_async,
-    store_identity_cookies_async,
+from core.governance import allow_llm_call_async
+from core.metrics import (
+    record_detector_signal,
+    record_external_api_call,
+    record_external_api_duration,
+    record_external_api_failure,
 )
 from core.redis import get_redis
-from core.security import SecurityError, ensure_url_allowed
+from core.db import async_session
 from core.models import Artifact, Job
-from core.metrics import record_detector_signal
+from core.security import SecurityError, ensure_url_allowed
 from scraper.detector import detect_blocked_response, detect_empty_parse
 from scraper.engine import EngineOutcome
-from scraper.fetcher import (
-    FetcherError,
-    fetch_html,
-    filter_cookies_for_url,
-    identity_headers,
-    merge_cookies,
-)
+from scraper.external_providers import ExternalFetchResult, ExternalProviderError, get_external_provider
 from scraper.llm_recovery import recover_with_llm
 from scraper.parsing import parse_html
 from scraper.selector_registry import load_selectors_async, record_candidates_async
 
 
-async def run_fast_engine(job_id: UUID) -> EngineOutcome:
+async def run_external_engine(job_id: UUID) -> EngineOutcome:
     async with async_session() as session:
         result = await session.execute(select(Job).where(Job.id == job_id))
         job = result.scalar_one_or_none()
@@ -49,7 +44,6 @@ async def run_fast_engine(job_id: UUID) -> EngineOutcome:
             return EngineOutcome(success=False, error="schema_missing")
         url = job.url
         schema_id = job.schema_id
-        engine = job.engine or "fast"
         tenant = job.tenant
 
     selectors = await load_selectors_async(schema_id)
@@ -57,48 +51,11 @@ async def run_fast_engine(job_id: UUID) -> EngineOutcome:
         return await _mark_failed(job_id, "no_selectors")
 
     redis = get_redis()
+    store = ArtifactStore()
     try:
-        await ensure_url_allowed(url)
-    except SecurityError as exc:
+        result = await fetch_external_html(url, tenant)
+    except ExternalProviderError as exc:
         return await _mark_failed(job_id, exc.code)
-    error = await guard_request_async(redis, url)
-    if error:
-        return await _mark_failed(job_id, error)
-
-    assignment = await acquire_identity_for_url_async(url, tenant)
-    identity = assignment.identity
-    headers = identity_headers(
-        identity.fingerprint if identity else None,
-        settings.fetch_user_agent,
-    )
-    identity_cookies = list(identity.cookies) if identity else []
-    request_cookies = filter_cookies_for_url(identity_cookies, url)
-    backend = "stealth" if engine == "stealth" and is_stealth_allowed(url) else "fast"
-
-    try:
-        result = await fetch_html(
-            url,
-            backend=backend,
-            headers=headers,
-            cookies=request_cookies,
-            proxy_url=assignment.proxy_url,
-            timeout_ms=settings.fetch_timeout_ms,
-            max_bytes=settings.fetch_max_bytes,
-            impersonate=settings.fetch_curl_impersonate,
-        )
-    except FetcherError as exc:
-        return await _mark_failed(job_id, exc.code)
-
-    if result.url:
-        try:
-            await ensure_url_allowed(result.url)
-        except SecurityError as exc:
-            return await _mark_failed(job_id, exc.code, html=result.html)
-
-    if identity and result.cookies:
-        merged = merge_cookies(identity_cookies, result.cookies)
-        if merged != identity_cookies:
-            await store_identity_cookies_async(identity.id, merged)
 
     blocked_reason = detect_blocked_response(
         result.status,
@@ -107,28 +64,23 @@ async def run_fast_engine(job_id: UUID) -> EngineOutcome:
         result.html,
     )
     if blocked_reason:
-        record_detector_signal(blocked_reason, engine, "pre_parse", result.url or url)
-        if result.status in {403, 429}:
-            domain = extract_domain(result.url or url)
-            if domain:
-                await record_failure_async(redis, domain, result.status)
-        if identity:
-            await record_identity_failure_async(identity.id, blocked_reason, url=url)
-        return EngineOutcome(success=False, error=blocked_reason, escalate=True)
+        record_detector_signal(blocked_reason, "external", "pre_parse", result.url or url)
+        await _update_job(job_id, None, blocked_reason, store, html=result.html)
+        return EngineOutcome(success=False, error=blocked_reason)
 
     data, errors = parse_html(result.html, selectors, base_url=result.url)
-    store = ArtifactStore()
-
     empty_reason = detect_empty_parse(result.status, data, selectors, errors)
     if empty_reason:
-        record_detector_signal(empty_reason, engine, "post_parse", result.url or url)
-        return EngineOutcome(success=False, error=empty_reason, escalate=True)
+        record_detector_signal(empty_reason, "external", "post_parse", result.url or url)
+        await _update_job(job_id, None, empty_reason, store, html=result.html)
+        return EngineOutcome(success=False, error=empty_reason)
 
     if errors:
         budget_allowed = await allow_llm_call_async(redis, str(job_id), tenant)
         if not budget_allowed:
-            await _update_job(job_id, None, "llm_budget_exceeded", store, html=result.html)
-            return EngineOutcome(success=False, error="llm_budget_exceeded")
+            error = "llm_budget_exceeded"
+            await _update_job(job_id, None, error, store, html=result.html)
+            return EngineOutcome(success=False, error=error)
 
         llm_result = await asyncio.to_thread(recover_with_llm, result.html, selectors, tenant)
         if llm_result.success and llm_result.data is not None:
@@ -142,6 +94,46 @@ async def run_fast_engine(job_id: UUID) -> EngineOutcome:
 
     await _update_job(job_id, data, None, store, html=result.html)
     return EngineOutcome(success=True, error=None)
+
+
+async def fetch_external_html(url: str, tenant: str | None) -> ExternalFetchResult:
+    try:
+        await ensure_url_allowed(url)
+    except SecurityError as exc:
+        raise ExternalProviderError(exc.code) from exc
+    if not settings.external_enabled:
+        raise ExternalProviderError("external_disabled")
+    if not settings.external_api_key:
+        raise ExternalProviderError("external_api_key_missing")
+    if not is_external_allowed(url):
+        raise ExternalProviderError("external_not_allowed")
+
+    provider = get_external_provider()
+    if provider is None:
+        raise ExternalProviderError("external_provider_unconfigured")
+
+    redis = get_redis()
+    if await is_external_circuit_open_async(redis, url):
+        raise ExternalProviderError("external_circuit_open")
+
+    estimated_cost = settings.external_cost_per_call
+    budget_allowed = await allow_external_call_async(redis, tenant, estimated_cost)
+    if not budget_allowed:
+        raise ExternalProviderError("external_budget_exceeded")
+
+    started_at = time.monotonic()
+    try:
+        result = await provider.fetch(url, settings.external_timeout_ms)
+    except ExternalProviderError as exc:
+        await record_external_failure_async(redis, url)
+        record_external_api_failure(provider.name, exc.code)
+        record_external_api_duration(provider.name, time.monotonic() - started_at)
+        raise
+
+    duration = time.monotonic() - started_at
+    record_external_api_call(provider.name, tenant, result.status, result.cost)
+    record_external_api_duration(provider.name, duration)
+    return result
 
 
 async def _update_job(

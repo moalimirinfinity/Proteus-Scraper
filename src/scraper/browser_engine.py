@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -27,12 +28,17 @@ from core.governance import (
 )
 from core.identities import (
     IdentityContext,
-    acquire_identity_async,
+    acquire_identity_for_url_async,
     record_identity_failure_async,
     store_identity_cookies_async,
+    store_identity_storage_state_async,
 )
 from core.models import Artifact, Job
+from core.metrics import record_detector_signal
+from core.security import SecurityError, ensure_url_allowed
+from scraper.detector import detect_blocked_response, detect_empty_parse
 from scraper.engine import EngineOutcome
+from scraper.fetcher import filter_cookies_for_url
 from scraper.llm_recovery import recover_with_llm
 from scraper.parsing import parse_html
 from scraper.selector_registry import load_selectors_async, record_candidates_async
@@ -40,13 +46,22 @@ from scraper.selector_registry import load_selectors_async, record_candidates_as
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class PageSnapshot:
+    html: str
+    url: str
+    status: int | None
+    headers: dict[str, str]
+
+
 async def render_preview_html(
     url: str,
     tenant: str | None = None,
 ) -> tuple[str, bytes, bytes]:
     redis = get_redis()
-    identity = await acquire_identity_async(tenant)
-    html, screenshot, har, _ = await _render_pages(url, redis, identity)
+    assignment = await acquire_identity_for_url_async(url, tenant)
+    identity = assignment.identity
+    html, screenshot, har, _ = await _render_pages(url, redis, identity, assignment.proxy_url)
     return html, screenshot, har
 
 
@@ -65,7 +80,12 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         return await _mark_failed(job_id, "no_selectors")
 
     redis = get_redis()
-    identity = await acquire_identity_async(job.tenant)
+    try:
+        await ensure_url_allowed(url)
+    except SecurityError as exc:
+        return await _mark_failed(job_id, exc.code)
+    assignment = await acquire_identity_for_url_async(url, job.tenant)
+    identity = assignment.identity
 
     logger.info(
         "Browser settings: timeout_ms=%s wait_until=%s wait_for_selector=%s wait_for_ms=%s scroll_steps=%s scroll_delay_ms=%s scroll_container=%s collect_max_items=%s pagination_max_pages=%s pagination_next_selector=%s pagination_param=%s pagination_start=%s pagination_step=%s pagination_template=%s headless=%s full_page=%s",
@@ -135,9 +155,14 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
     har_bytes = None
     error: str | None = None
 
-    snapshots: list[tuple[str, str]] = []
+    snapshots: list[PageSnapshot] = []
     try:
-        html, screenshot_bytes, har_bytes, snapshots = await _render_pages(url, redis, identity)
+        html, screenshot_bytes, har_bytes, snapshots = await _render_pages(
+            url,
+            redis,
+            identity,
+            assignment.proxy_url,
+        )
     except GovernanceError as exc:
         error = exc.code
     except PlaywrightTimeoutError:
@@ -146,15 +171,30 @@ async def run_browser_engine(job_id: UUID) -> EngineOutcome:
         error = "navigation_failed"
 
     if error:
+        if error in {"http_403", "http_429"}:
+            if identity:
+                await record_identity_failure_async(identity.id, error, url=url)
+            return EngineOutcome(success=False, error=error, escalate=True)
         if identity:
-            await record_identity_failure_async(identity.id, error)
+            await record_identity_failure_async(identity.id, error, url=url)
         await _update_job(job_id, None, error, store)
         return EngineOutcome(success=False, error=error)
+
+    blocked_reason = _detect_blocked_snapshots(snapshots)
+    if blocked_reason:
+        record_detector_signal(blocked_reason, "browser", "pre_parse", url)
+        if identity:
+            await record_identity_failure_async(identity.id, blocked_reason, url=url)
+        return EngineOutcome(success=False, error=blocked_reason, escalate=True)
 
     if _should_collect_items():
         data, errors = _collect_from_snapshots(snapshots, selectors)
     else:
         data, errors = parse_html(html or "", selectors, base_url=url)
+    empty_reason = detect_empty_parse(_latest_snapshot_status(snapshots), data, selectors, errors)
+    if empty_reason:
+        record_detector_signal(empty_reason, "browser", "post_parse", url)
+        return EngineOutcome(success=False, error=empty_reason, escalate=True)
     if errors:
         budget_allowed = await allow_llm_call_async(redis, str(job.id), job.tenant)
         if not budget_allowed:
@@ -179,9 +219,10 @@ async def _render_pages(
     url: str,
     redis,
     identity: IdentityContext | None,
-) -> tuple[str, bytes, bytes, list[tuple[str, str]]]:
+    proxy_url: str | None,
+) -> tuple[str, bytes, bytes, list[PageSnapshot]]:
     html = ""
-    snapshots: list[tuple[str, str]] = []
+    snapshots: list[PageSnapshot] = []
     with tempfile.TemporaryDirectory() as tmpdir:
         har_path = os.path.join(tmpdir, "trace.har")
         async with async_playwright() as playwright:
@@ -189,11 +230,15 @@ async def _render_pages(
             context = None
             try:
                 context_kwargs = {"record_har_path": har_path}
+                if proxy_url:
+                    context_kwargs["proxy"] = {"server": proxy_url}
                 fingerprint = identity.fingerprint if identity else {}
                 context_kwargs.update(_context_kwargs_from_fingerprint(fingerprint))
+                if identity and identity.storage_state:
+                    context_kwargs["storage_state"] = identity.storage_state
                 context = await browser.new_context(**context_kwargs)
-                if identity and identity.cookies:
-                    cookies = _filter_context_cookies(identity.cookies)
+                if identity and identity.cookies and not identity.storage_state:
+                    cookies = _filter_context_cookies(identity.cookies, url)
                     if cookies:
                         await context.add_cookies(cookies)
                 permissions = fingerprint.get("permissions") if isinstance(fingerprint, dict) else None
@@ -206,7 +251,7 @@ async def _render_pages(
                         page_snapshots = await _render_single_page(page, page_url, redis)
                         snapshots.extend(page_snapshots)
                         if page_snapshots:
-                            html = page_snapshots[-1][0]
+                            html = page_snapshots[-1].html
                 else:
                     current_url = url
                     visited: set[str] = set()
@@ -217,7 +262,7 @@ async def _render_pages(
                         page_snapshots = await _render_single_page(page, current_url, redis)
                         snapshots.extend(page_snapshots)
                         if page_snapshots:
-                            html = page_snapshots[-1][0]
+                            html = page_snapshots[-1].html
                         if not settings.browser_pagination_next_selector:
                             break
                         next_url = _extract_next_url(html, current_url)
@@ -226,9 +271,10 @@ async def _render_pages(
                         current_url = next_url
 
                 if not html and snapshots:
-                    html = snapshots[-1][0]
+                    html = snapshots[-1].html
                 if identity:
                     await store_identity_cookies_async(identity.id, await context.cookies())
+                    await store_identity_storage_state_async(identity.id, await context.storage_state())
                 screenshot = await page.screenshot(full_page=settings.browser_full_page)
             finally:
                 if context is not None:
@@ -241,7 +287,7 @@ async def _render_pages(
     return html, screenshot, har_bytes, snapshots
 
 
-async def _render_single_page(page, url: str, redis) -> list[tuple[str, str]]:
+async def _render_single_page(page, url: str, redis) -> list[PageSnapshot]:
     error = await guard_request_async(redis, url)
     if error:
         raise GovernanceError(error)
@@ -251,29 +297,38 @@ async def _render_single_page(page, url: str, redis) -> list[tuple[str, str]]:
         wait_until=settings.browser_wait_until,
         timeout=settings.browser_timeout_ms,
     )
+    if response is not None and response.url:
+        try:
+            await ensure_url_allowed(response.url)
+        except SecurityError as exc:
+            raise GovernanceError(exc.code) from exc
     status = response.status if response else None
+    headers = {str(k): str(v) for k, v in (response.headers or {}).items()} if response else {}
     if domain and status in {403, 429}:
         await record_failure_async(redis, domain, status)
-        raise GovernanceError(f"http_{status}")
-    if settings.browser_wait_for_selector:
+    if status not in {403, 429} and settings.browser_wait_for_selector:
         await page.wait_for_selector(
             settings.browser_wait_for_selector,
             timeout=settings.browser_timeout_ms,
         )
-    if settings.browser_wait_for_ms > 0:
+    if status not in {403, 429} and settings.browser_wait_for_ms > 0:
         await page.wait_for_timeout(settings.browser_wait_for_ms)
-    return await _collect_scroll_snapshots(page)
+    return await _collect_scroll_snapshots(page, status, headers)
 
 
-async def _collect_scroll_snapshots(page) -> list[tuple[str, str]]:
-    snapshots = [(await page.content(), page.url)]
+async def _collect_scroll_snapshots(
+    page,
+    status: int | None,
+    headers: dict[str, str],
+) -> list[PageSnapshot]:
+    snapshots = [PageSnapshot(await page.content(), page.url, status, headers)]
     if settings.browser_scroll_steps <= 0:
         return snapshots
     for _ in range(settings.browser_scroll_steps):
         await _scroll_once(page)
         if settings.browser_scroll_delay_ms > 0:
             await page.wait_for_timeout(settings.browser_scroll_delay_ms)
-        snapshots.append((await page.content(), page.url))
+        snapshots.append(PageSnapshot(await page.content(), page.url, status, headers))
     return snapshots
 
 
@@ -372,10 +427,11 @@ def _context_kwargs_from_fingerprint(fingerprint: dict) -> dict:
     return kwargs
 
 
-def _filter_context_cookies(cookies: list[dict]) -> list[dict]:
+def _filter_context_cookies(cookies: list[dict], url: str) -> list[dict]:
+    filtered = filter_cookies_for_url(cookies, url)
     return [
         cookie
-        for cookie in cookies
+        for cookie in filtered
         if isinstance(cookie, dict) and (cookie.get("url") or cookie.get("domain"))
     ]
 
@@ -412,15 +468,15 @@ def _should_collect_items() -> bool:
 
 
 def _collect_from_snapshots(
-    snapshots: list[tuple[str, str]],
+    snapshots: list[PageSnapshot],
     selectors: list,
 ) -> tuple[dict, list[str]]:
     if not snapshots:
         return {}, ["no_html"]
     groups = _group_selectors(selectors)
     if not groups:
-        html, base_url = snapshots[-1]
-        return parse_html(html or "", selectors, base_url=base_url)
+        snapshot = snapshots[-1]
+        return parse_html(snapshot.html or "", selectors, base_url=snapshot.url)
 
     aggregated: dict[str, list[dict[str, object]]] = {name: [] for name in groups}
     seen: dict[str, set[str]] = {name: set() for name in groups}
@@ -428,8 +484,8 @@ def _collect_from_snapshots(
     last_errors: list[str] = []
     max_items = settings.browser_collect_max_items
 
-    for html, base_url in snapshots:
-        data, errors = parse_html(html or "", selectors, base_url=base_url)
+    for snapshot in snapshots:
+        data, errors = parse_html(snapshot.html or "", selectors, base_url=snapshot.url)
         last_errors = errors
         for key, value in data.items():
             if key in groups:
@@ -495,6 +551,25 @@ def _filter_list_errors(errors: list[str], groups_with_items: set[str]) -> list[
             continue
         filtered.append(error)
     return filtered
+
+
+def _detect_blocked_snapshots(snapshots: list[PageSnapshot]) -> str | None:
+    for snapshot in snapshots:
+        reason = detect_blocked_response(
+            snapshot.status,
+            snapshot.headers,
+            snapshot.url,
+            snapshot.html,
+        )
+        if reason:
+            return reason
+    return None
+
+
+def _latest_snapshot_status(snapshots: list[PageSnapshot]) -> int | None:
+    if not snapshots:
+        return None
+    return snapshots[-1].status
 
 
 def _error_group_name(error: str) -> str | None:

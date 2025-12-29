@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.auth import assert_tenant_access, get_auth_context, resolve_tenant
 from api.schemas import (
     ArtifactOut,
     EngineType,
@@ -21,6 +20,10 @@ from api.schemas import (
     IdentityCreate,
     IdentityOut,
     IdentityUpdate,
+    ProxyMode,
+    ProxyPolicyCreate,
+    ProxyPolicyOut,
+    ProxyPolicyUpdate,
     PreviewHtmlRequest,
     PreviewHtmlResponse,
     PreviewRequest,
@@ -35,16 +38,62 @@ from api.schemas import (
 from core.artifacts import ArtifactStore
 from core.config import settings
 from core.db import get_session
+from core.engine_policy import is_stealth_allowed
+from core.governance import extract_domain, guard_request_async, record_failure_async
+from core.identities import (
+    acquire_identity_for_url_async,
+    record_identity_failure_async,
+    store_identity_cookies_async,
+)
 from core.identity_crypto import IdentityCryptoError, encrypt_payload
 from core.metrics import record_job_state
-from core.models import Artifact, Identity, Job, Schema, Selector, SelectorCandidate
+from core.models import Artifact, Identity, Job, ProxyPolicy, Schema, Selector, SelectorCandidate
 from core.queues import enqueue_priority
 from core.redis import get_redis
+from core.security import SecurityError, ensure_url_allowed
+from core.ui_rate_limit import allow_ui_action_async
 from core.tasks import process_job, select_engine
-from core.governance import guard_request_async
 from scraper.browser_engine import render_preview_html
+from scraper.external_engine import fetch_external_html
+from scraper.external_providers import ExternalProviderError
+from scraper.fetcher import (
+    FetcherError,
+    fetch_html,
+    filter_cookies_for_url,
+    identity_headers,
+    merge_cookies,
+)
 
 router = APIRouter()
+
+
+def _raise_security_error(exc: SecurityError) -> None:
+    if exc.code in {"invalid_url", "invalid_scheme", "dns_failed"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.code)
+
+
+def _rate_limit_actor(request: Request) -> str:
+    ctx = get_auth_context(request)
+    if ctx and ctx.tenant:
+        return f"tenant:{ctx.tenant}"
+    if request.client and request.client.host:
+        return f"ip:{request.client.host}"
+    return "unknown"
+
+
+async def _enforce_ui_rate_limit(request: Request, scope: str) -> None:
+    if scope == "preview":
+        limit = settings.ui_rate_limit_preview_per_min
+    else:
+        limit = settings.ui_rate_limit_schema_per_min
+    window = settings.ui_rate_limit_window_sec
+    if limit <= 0 or window <= 0:
+        return
+    redis = get_redis()
+    allowed = await allow_ui_action_async(redis, scope, _rate_limit_actor(request), limit, window)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="rate_limited")
 
 
 def _coerce_state(value: str) -> JobState:
@@ -96,6 +145,22 @@ def _selector_out(selector: Selector) -> SelectorOut:
     )
 
 
+def _proxy_policy_out(policy: ProxyPolicy) -> ProxyPolicyOut:
+    try:
+        mode = ProxyMode(policy.mode)
+    except ValueError:
+        mode = ProxyMode.gateway
+    return ProxyPolicyOut(
+        id=str(policy.id),
+        domain=policy.domain,
+        mode=mode,
+        proxy_url=policy.proxy_url,
+        enabled=policy.enabled,
+        created_at=policy.created_at,
+        updated_at=policy.updated_at,
+    )
+
+
 def _identity_out(identity: Identity) -> IdentityOut:
     return IdentityOut(
         id=str(identity.id),
@@ -133,14 +198,20 @@ def _candidate_out(candidate: SelectorCandidate) -> SelectorCandidateOut:
 @router.post("/submit", response_model=JobSubmitResponse, status_code=status.HTTP_201_CREATED)
 async def submit_job(
     payload: JobSubmitRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> JobSubmitResponse:
+    try:
+        await ensure_url_allowed(str(payload.url))
+    except SecurityError as exc:
+        _raise_security_error(exc)
+    tenant = resolve_tenant(request, payload.tenant)
     job = Job(
         url=str(payload.url),
         state=JobState.queued.value,
         priority=payload.priority.value,
         schema_id=payload.schema_id,
-        tenant=payload.tenant,
+        tenant=tenant,
         engine=payload.engine.value if payload.engine else None,
     )
     session.add(job)
@@ -161,12 +232,14 @@ async def submit_job(
 @router.get("/status/{job_id}", response_model=JobStatusResponse)
 async def get_status(
     job_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> JobStatusResponse:
     result = await session.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    assert_tenant_access(request, job.tenant)
 
     return JobStatusResponse(
         job_id=str(job.id),
@@ -183,12 +256,14 @@ async def get_status(
 @router.get("/results/{job_id}", response_model=JobResultResponse)
 async def get_results(
     job_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> JobResultResponse:
     result = await session.execute(select(Job).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    assert_tenant_access(request, job.tenant)
 
     artifact_result = await session.execute(select(Artifact).where(Artifact.job_id == job_id))
     artifacts = [
@@ -211,15 +286,98 @@ async def get_results(
     )
 
 
+@router.get("/proxy-policies", response_model=list[ProxyPolicyOut])
+async def list_proxy_policies(
+    domain: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[ProxyPolicyOut]:
+    query = select(ProxyPolicy).order_by(ProxyPolicy.domain)
+    if domain:
+        query = query.where(ProxyPolicy.domain == domain)
+    result = await session.execute(query)
+    return [_proxy_policy_out(policy) for policy in result.scalars().all()]
+
+
+@router.post("/proxy-policies", response_model=ProxyPolicyOut, status_code=status.HTTP_201_CREATED)
+async def create_proxy_policy(
+    payload: ProxyPolicyCreate,
+    session: AsyncSession = Depends(get_session),
+) -> ProxyPolicyOut:
+    existing = await session.execute(
+        select(ProxyPolicy).where(ProxyPolicy.domain == payload.domain)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="policy already exists")
+    if payload.mode == ProxyMode.custom and not payload.proxy_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="proxy_url required")
+
+    policy = ProxyPolicy(
+        domain=payload.domain,
+        mode=payload.mode.value,
+        proxy_url=payload.proxy_url,
+        enabled=payload.enabled,
+    )
+    session.add(policy)
+    await session.commit()
+    await session.refresh(policy)
+    return _proxy_policy_out(policy)
+
+
+@router.patch("/proxy-policies/{policy_id}", response_model=ProxyPolicyOut)
+async def update_proxy_policy(
+    policy_id: UUID,
+    payload: ProxyPolicyUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> ProxyPolicyOut:
+    result = await session.execute(select(ProxyPolicy).where(ProxyPolicy.id == policy_id))
+    policy = result.scalar_one_or_none()
+    if policy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="policy not found")
+
+    if payload.mode is not None:
+        policy.mode = payload.mode.value
+    if payload.proxy_url is not None:
+        policy.proxy_url = payload.proxy_url
+    if payload.enabled is not None:
+        policy.enabled = payload.enabled
+    if policy.mode == ProxyMode.custom.value and not policy.proxy_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="proxy_url required")
+
+    await session.commit()
+    await session.refresh(policy)
+    return _proxy_policy_out(policy)
+
+
+@router.delete("/proxy-policies/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_proxy_policy(
+    policy_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    result = await session.execute(select(ProxyPolicy).where(ProxyPolicy.id == policy_id))
+    policy = result.scalar_one_or_none()
+    if policy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="policy not found")
+    await session.delete(policy)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(
     artifact_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    result = await session.execute(select(Artifact).where(Artifact.id == artifact_id))
-    artifact = result.scalar_one_or_none()
-    if artifact is None:
+    result = await session.execute(
+        select(Artifact, Job)
+        .join(Job, Artifact.job_id == Job.id)
+        .where(Artifact.id == artifact_id)
+    )
+    row = result.first()
+    if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+    artifact, job = row
+    assert_tenant_access(request, job.tenant)
 
     content_type = {
         "html": "text/html",
@@ -235,11 +393,39 @@ async def get_artifact(
 
 
 @router.post("/preview/html", response_model=PreviewHtmlResponse)
-async def preview_html(payload: PreviewHtmlRequest) -> PreviewHtmlResponse:
+async def preview_html(payload: PreviewHtmlRequest, request: Request) -> PreviewHtmlResponse:
+    await _enforce_ui_rate_limit(request, "preview")
+    try:
+        await ensure_url_allowed(payload.url)
+    except SecurityError as exc:
+        _raise_security_error(exc)
+    tenant = resolve_tenant(request, payload.tenant)
     engine_value = payload.engine.value if payload.engine else select_engine(payload.url)
     engine = EngineType(engine_value)
+    if engine == EngineType.stealth and not is_stealth_allowed(payload.url):
+        engine = EngineType.fast
     if engine == EngineType.browser:
-        html, _, _ = await render_preview_html(payload.url, payload.tenant)
+        html, _, _ = await render_preview_html(payload.url, tenant)
+    elif engine == EngineType.external:
+        try:
+            result = await fetch_external_html(payload.url, tenant)
+        except ExternalProviderError as exc:
+            detail = exc.code
+            status_code = status.HTTP_403_FORBIDDEN if detail == "external_not_allowed" else None
+            if detail == "external_budget_exceeded":
+                status_code = status.HTTP_429_TOO_MANY_REQUESTS
+            if detail in {
+                "external_disabled",
+                "external_circuit_open",
+                "external_api_key_missing",
+                "external_provider_unconfigured",
+            }:
+                status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            raise HTTPException(
+                status_code=status_code or status.HTTP_502_BAD_GATEWAY,
+                detail=detail,
+            ) from exc
+        html = result.html
     else:
         redis = get_redis()
         error = await guard_request_async(redis, payload.url)
@@ -250,8 +436,57 @@ async def preview_html(payload: PreviewHtmlRequest) -> PreviewHtmlResponse:
                 else status.HTTP_503_SERVICE_UNAVAILABLE
             )
             raise HTTPException(status_code=status_code, detail=error)
+        assignment = await acquire_identity_for_url_async(payload.url, tenant)
+        identity = assignment.identity
+        headers = identity_headers(
+            identity.fingerprint if identity else None,
+            settings.fetch_user_agent,
+        )
+        identity_cookies = list(identity.cookies) if identity else []
+        request_cookies = filter_cookies_for_url(identity_cookies, payload.url)
         max_chars = settings.preview_html_max_chars
-        html = await asyncio.to_thread(_fetch_html, payload.url, max_chars + 1)
+        backend = (
+            "stealth"
+            if engine == EngineType.stealth and is_stealth_allowed(payload.url)
+            else "fast"
+        )
+        try:
+            result = await fetch_html(
+                payload.url,
+                backend=backend,
+                headers=headers,
+                cookies=request_cookies,
+                proxy_url=assignment.proxy_url,
+                timeout_ms=settings.fetch_timeout_ms,
+                max_bytes=max_chars + 1,
+                impersonate=settings.fetch_curl_impersonate,
+            )
+        except FetcherError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=exc.code,
+            ) from exc
+
+        if identity and result.cookies:
+            merged = merge_cookies(identity_cookies, result.cookies)
+            if merged != identity_cookies:
+                await store_identity_cookies_async(identity.id, merged)
+
+        if result.status in {403, 429}:
+            domain = extract_domain(result.url or payload.url)
+            if domain:
+                await record_failure_async(redis, domain, result.status)
+            if identity:
+                await record_identity_failure_async(identity.id, f"http_{result.status}", url=payload.url)
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_429_TOO_MANY_REQUESTS
+                    if result.status == 429
+                    else status.HTTP_403_FORBIDDEN
+                ),
+                detail=f"http_{result.status}",
+            )
+        html = result.html
     truncated_html, truncated = _truncate_html(html, settings.preview_html_max_chars)
     return PreviewHtmlResponse(
         url=payload.url,
@@ -264,8 +499,10 @@ async def preview_html(payload: PreviewHtmlRequest) -> PreviewHtmlResponse:
 @router.post("/schemas", response_model=SchemaOut, status_code=status.HTTP_201_CREATED)
 async def create_schema(
     payload: SchemaCreate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> SchemaOut:
+    await _enforce_ui_rate_limit(request, "schema")
     result = await session.execute(select(Schema).where(Schema.id == payload.schema_id))
     existing = result.scalar_one_or_none()
     if existing is not None:
@@ -324,8 +561,10 @@ async def get_schema(
 async def update_schema(
     schema_id: str,
     payload: SchemaUpdate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> SchemaOut:
+    await _enforce_ui_rate_limit(request, "schema")
     result = await session.execute(select(Schema).where(Schema.id == schema_id))
     schema = result.scalar_one_or_none()
     if schema is None:
@@ -344,8 +583,10 @@ async def update_schema(
 @router.delete("/schemas/{schema_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_schema(
     schema_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
+    await _enforce_ui_rate_limit(request, "schema")
     schema_result = await session.execute(select(Schema).where(Schema.id == schema_id))
     schema = schema_result.scalar_one_or_none()
     selector_result = await session.execute(
@@ -403,8 +644,10 @@ async def list_selector_candidates(
 async def promote_selector_candidate(
     schema_id: str,
     candidate_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> SelectorCandidateOut:
+    await _enforce_ui_rate_limit(request, "schema")
     result = await session.execute(
         select(SelectorCandidate)
         .where(SelectorCandidate.id == candidate_id)
@@ -450,8 +693,10 @@ async def promote_selector_candidate(
 async def delete_selector_candidate(
     schema_id: str,
     candidate_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
+    await _enforce_ui_rate_limit(request, "schema")
     result = await session.execute(
         select(SelectorCandidate)
         .where(SelectorCandidate.id == candidate_id)
@@ -473,8 +718,10 @@ async def delete_selector_candidate(
 async def create_selector(
     schema_id: str,
     payload: SelectorCreate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> SelectorOut:
+    await _enforce_ui_rate_limit(request, "schema")
     schema_result = await session.execute(select(Schema).where(Schema.id == schema_id))
     schema = schema_result.scalar_one_or_none()
     if schema is None:
@@ -515,8 +762,10 @@ async def update_selector(
     schema_id: str,
     selector_id: UUID,
     payload: SelectorUpdate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> SelectorOut:
+    await _enforce_ui_rate_limit(request, "schema")
     result = await session.execute(
         select(Selector)
         .where(Selector.id == selector_id)
@@ -555,8 +804,10 @@ async def update_selector(
 async def delete_selector(
     schema_id: str,
     selector_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
+    await _enforce_ui_rate_limit(request, "schema")
     result = await session.execute(
         select(Selector)
         .where(Selector.id == selector_id)
@@ -573,12 +824,14 @@ async def delete_selector(
 
 @router.get("/identities", response_model=list[IdentityOut])
 async def list_identities(
+    request: Request,
     tenant: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[IdentityOut]:
     query = select(Identity).order_by(Identity.created_at.desc())
-    if tenant is not None:
-        query = query.where(Identity.tenant == tenant)
+    tenant_filter = resolve_tenant(request, tenant)
+    if tenant_filter is not None:
+        query = query.where(Identity.tenant == tenant_filter)
     result = await session.execute(query)
     return [_identity_out(identity) for identity in result.scalars().all()]
 
@@ -586,9 +839,10 @@ async def list_identities(
 @router.post("/identities", response_model=IdentityOut, status_code=status.HTTP_201_CREATED)
 async def create_identity(
     payload: IdentityCreate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> IdentityOut:
-    tenant_key = payload.tenant or "default"
+    tenant_key = resolve_tenant(request, payload.tenant) or "default"
     identity = Identity(
         tenant=tenant_key,
         label=payload.label,
@@ -600,6 +854,11 @@ async def create_identity(
             identity.cookies_encrypted = encrypt_payload(payload.cookies)
         except IdentityCryptoError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
+    if payload.storage_state is not None:
+        try:
+            identity.storage_state_encrypted = encrypt_payload(payload.storage_state)
+        except IdentityCryptoError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
     session.add(identity)
     await session.commit()
     await session.refresh(identity)
@@ -609,12 +868,14 @@ async def create_identity(
 @router.get("/identities/{identity_id}", response_model=IdentityOut)
 async def get_identity(
     identity_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> IdentityOut:
     result = await session.execute(select(Identity).where(Identity.id == identity_id))
     identity = result.scalar_one_or_none()
     if identity is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="identity not found")
+    assert_tenant_access(request, identity.tenant)
     return _identity_out(identity)
 
 
@@ -622,12 +883,14 @@ async def get_identity(
 async def update_identity(
     identity_id: UUID,
     payload: IdentityUpdate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> IdentityOut:
     result = await session.execute(select(Identity).where(Identity.id == identity_id))
     identity = result.scalar_one_or_none()
     if identity is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="identity not found")
+    assert_tenant_access(request, identity.tenant)
 
     if payload.label is not None:
         identity.label = payload.label
@@ -640,6 +903,11 @@ async def update_identity(
             identity.cookies_encrypted = encrypt_payload(payload.cookies)
         except IdentityCryptoError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
+    if payload.storage_state is not None:
+        try:
+            identity.storage_state_encrypted = encrypt_payload(payload.storage_state)
+        except IdentityCryptoError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code)
 
     await session.commit()
     await session.refresh(identity)
@@ -649,12 +917,14 @@ async def update_identity(
 @router.delete("/identities/{identity_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_identity(
     identity_id: UUID,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     result = await session.execute(select(Identity).where(Identity.id == identity_id))
     identity = result.scalar_one_or_none()
     if identity is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="identity not found")
+    assert_tenant_access(request, identity.tenant)
     await session.delete(identity)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -664,8 +934,14 @@ async def delete_identity(
 async def preview_schema(
     schema_id: str,
     payload: PreviewRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> JobResultResponse:
+    await _enforce_ui_rate_limit(request, "preview")
+    try:
+        await ensure_url_allowed(payload.url)
+    except SecurityError as exc:
+        _raise_security_error(exc)
     selector_result = await session.execute(
         select(Selector.id)
         .where(Selector.schema_id == schema_id)
@@ -676,12 +952,14 @@ async def preview_schema(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no selectors for schema")
 
     engine = payload.engine.value if payload.engine else select_engine(payload.url)
+    tenant = resolve_tenant(request, None)
     job = Job(
         url=str(payload.url),
         state=JobState.queued.value,
         priority=JobPriority.standard.value,
         schema_id=schema_id,
         engine=engine,
+        tenant=tenant,
     )
     session.add(job)
     await session.commit()
@@ -717,13 +995,6 @@ def _truncate_html(html: str, max_chars: int) -> tuple[str, bool]:
     if len(html) <= max_chars:
         return html, False
     return html[:max_chars], True
-
-
-def _fetch_html(url: str, max_chars: int) -> str:
-    request = Request(url, headers={"User-Agent": "ProteusPreview/1.0"})
-    with urlopen(request, timeout=15) as response:
-        data = response.read(max_chars)
-    return data.decode("utf-8", errors="ignore")
 
 
 def _now():

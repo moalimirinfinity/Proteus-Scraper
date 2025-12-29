@@ -122,6 +122,25 @@ class SelectorCandidate(Base):
     )
 
 
+class ProxyPolicy(Base):
+    __tablename__ = "proxy_policies"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    domain: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False, default="gateway")
+    proxy_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class Identity(Base):
     __tablename__ = "identities"
 
@@ -130,6 +149,7 @@ class Identity(Base):
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
     fingerprint: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     cookies_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_state_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

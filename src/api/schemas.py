@@ -27,6 +27,13 @@ class EngineType(str, Enum):
     fast = "fast"
     browser = "browser"
     stealth = "stealth"
+    external = "external"
+
+
+class ProxyMode(str, Enum):
+    direct = "direct"
+    gateway = "gateway"
+    custom = "custom"
 
 
 class JobSubmitRequest(BaseModel):
@@ -59,6 +66,29 @@ class ArtifactOut(BaseModel):
     location: str
     checksum: str | None = None
     created_at: datetime
+
+
+class ProxyPolicyCreate(BaseModel):
+    domain: str = Field(..., min_length=1)
+    mode: ProxyMode = ProxyMode.gateway
+    proxy_url: str | None = None
+    enabled: bool = True
+
+
+class ProxyPolicyUpdate(BaseModel):
+    mode: ProxyMode | None = None
+    proxy_url: str | None = None
+    enabled: bool | None = None
+
+
+class ProxyPolicyOut(BaseModel):
+    id: str
+    domain: str
+    mode: ProxyMode
+    proxy_url: str | None = None
+    enabled: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class JobResultResponse(BaseModel):
@@ -145,6 +175,7 @@ class IdentityCreate(BaseModel):
     label: str | None = None
     fingerprint: dict[str, Any] | None = None
     cookies: list[dict[str, Any]] | None = None
+    storage_state: dict[str, Any] | None = None
     active: bool = True
 
 
@@ -152,6 +183,7 @@ class IdentityUpdate(BaseModel):
     label: str | None = None
     fingerprint: dict[str, Any] | None = None
     cookies: list[dict[str, Any]] | None = None
+    storage_state: dict[str, Any] | None = None
     active: bool | None = None
 
 

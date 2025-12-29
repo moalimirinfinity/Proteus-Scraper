@@ -7,3 +7,4 @@ from dataclasses import dataclass
 class EngineOutcome:
     success: bool
     error: str | None = None
+    escalate: bool = False

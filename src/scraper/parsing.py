@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
+try:
+    from parsel import Selector as ParselSelector
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    ParselSelector = None
+
 from selectolax.parser import HTMLParser
 
 
@@ -18,6 +23,18 @@ class SelectorSpec:
 
 
 def parse_html(html: str, selectors: list[SelectorSpec], base_url: str | None = None) -> tuple[dict, list[str]]:
+    if _requires_parsel(selectors):
+        if ParselSelector is None:
+            return {}, ["parsel_unavailable"]
+        return _parse_with_parsel(html, selectors, base_url)
+    return _parse_with_selectolax(html, selectors, base_url)
+
+
+def _parse_with_selectolax(
+    html: str,
+    selectors: list[SelectorSpec],
+    base_url: str | None,
+) -> tuple[dict, list[str]]:
     tree = HTMLParser(html)
     data: dict[str, object] = {}
     errors: list[str] = []
@@ -25,7 +42,8 @@ def parse_html(html: str, selectors: list[SelectorSpec], base_url: str | None = 
     flat, groups = _split_selectors(selectors)
 
     for spec in flat:
-        node = tree.css_first(spec.selector)
+        selector = _strip_css_prefix(spec.selector)
+        node = tree.css_first(selector)
         raw = _extract_raw(node, spec, base_url)
         if raw is None or raw == "":
             if spec.required:
@@ -44,6 +62,7 @@ def parse_html(html: str, selectors: list[SelectorSpec], base_url: str | None = 
             data[group_name] = []
             continue
 
+        item_selector = _strip_css_prefix(item_selector)
         items = tree.css(item_selector)
         if not items:
             if any(spec.required for spec in specs):
@@ -55,8 +74,71 @@ def parse_html(html: str, selectors: list[SelectorSpec], base_url: str | None = 
         for idx, item in enumerate(items):
             item_data: dict[str, object] = {}
             for spec in specs:
-                node = item.css_first(spec.selector)
+                selector = _strip_css_prefix(spec.selector)
+                node = item.css_first(selector)
                 raw = _extract_raw(node, spec, base_url)
+                if raw is None or raw == "":
+                    if spec.required:
+                        errors.append(f"missing:{group_name}.{spec.field}:{idx}")
+                    continue
+                try:
+                    item_data[spec.field] = coerce_value(raw, spec.data_type)
+                except ValueError:
+                    errors.append(f"type:{group_name}.{spec.field}:{idx}")
+            group_items.append(item_data)
+
+        data[group_name] = group_items
+
+    return data, errors
+
+
+def _parse_with_parsel(
+    html: str,
+    selectors: list[SelectorSpec],
+    base_url: str | None,
+) -> tuple[dict, list[str]]:
+    root = ParselSelector(text=html)
+    data: dict[str, object] = {}
+    errors: list[str] = []
+
+    flat, groups = _split_selectors(selectors)
+
+    for spec in flat:
+        engine, selector = _split_selector(spec.selector)
+        node = _select_first(root, engine, selector)
+        raw = _extract_raw_parsel(node, spec, base_url)
+        if raw is None or raw == "":
+            if spec.required:
+                errors.append(f"missing:{spec.field}")
+            continue
+        try:
+            data[spec.field] = coerce_value(raw, spec.data_type)
+        except ValueError:
+            errors.append(f"type:{spec.field}")
+
+    for group_name, specs in groups.items():
+        item_selector = _resolve_item_selector(specs)
+        if not item_selector:
+            if any(spec.required for spec in specs):
+                errors.append(f"missing_group_selector:{group_name}")
+            data[group_name] = []
+            continue
+
+        engine, selector = _split_selector(item_selector)
+        items = _select_all(root, engine, selector)
+        if not items:
+            if any(spec.required for spec in specs):
+                errors.append(f"missing:{group_name}")
+            data[group_name] = []
+            continue
+
+        group_items: list[dict[str, object]] = []
+        for idx, item in enumerate(items):
+            item_data: dict[str, object] = {}
+            for spec in specs:
+                engine, selector = _split_selector(spec.selector)
+                node = _select_first(item, engine, selector)
+                raw = _extract_raw_parsel(node, spec, base_url)
                 if raw is None or raw == "":
                     if spec.required:
                         errors.append(f"missing:{group_name}.{spec.field}:{idx}")
@@ -163,6 +245,20 @@ def _extract_raw(node, spec: SelectorSpec, base_url: str | None) -> str | None:
     return node.text(strip=True)
 
 
+def _extract_raw_parsel(node, spec: SelectorSpec, base_url: str | None) -> str | None:
+    if node is None:
+        return None
+    if spec.attribute:
+        value = node.attrib.get(spec.attribute)
+        if value is None:
+            return None
+        return _normalize_attribute(value, spec.attribute, base_url)
+    value = node.xpath("string(.)").get()
+    if value is None:
+        return None
+    return value.strip()
+
+
 def _normalize_attribute(value: str, attribute: str, base_url: str | None) -> str:
     if not base_url:
         return value
@@ -198,3 +294,37 @@ def _normalize_value(value: object, data_type: str) -> object:
             return value != 0
         raise ValueError("invalid bool")
     return value
+
+
+def _requires_parsel(selectors: list[SelectorSpec]) -> bool:
+    for spec in selectors:
+        if spec.selector.startswith("xpath:"):
+            return True
+        if spec.item_selector and spec.item_selector.startswith("xpath:"):
+            return True
+    return False
+
+
+def _split_selector(selector: str) -> tuple[str, str]:
+    if selector.startswith("xpath:"):
+        return "xpath", selector[len("xpath:") :]
+    if selector.startswith("css:"):
+        return "css", selector[len("css:") :]
+    return "css", selector
+
+
+def _strip_css_prefix(selector: str) -> str:
+    if selector.startswith("css:"):
+        return selector[len("css:") :]
+    return selector
+
+
+def _select_first(node, engine: str, selector: str):
+    results = _select_all(node, engine, selector)
+    return results[0] if results else None
+
+
+def _select_all(node, engine: str, selector: str):
+    if engine == "xpath":
+        return node.xpath(selector)
+    return node.css(selector)

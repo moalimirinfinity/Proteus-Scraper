@@ -3,7 +3,7 @@ from __future__ import annotations
 from redis.asyncio import Redis
 
 PRIORITY_ORDER = ("high", "standard", "low")
-ENGINE_TYPES = ("fast", "browser", "stealth")
+ENGINE_TYPES = ("fast", "stealth", "browser", "external")
 
 
 def priority_key(priority: str) -> str:
